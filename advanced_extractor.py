@@ -147,8 +147,8 @@ def agent_locate_all_outcomes(full_text: str) -> list:
     return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "defined_outcomes") or []
 
 def agent_parse_universal_table(table_text: str) -> list:
-    """Agent 3: Universal table parser for ANY clinical trial table format."""
-    prompt = f'''You are an expert at parsing ANY clinical trial table format. Analyze this table regardless of journal style or layout.
+    """Agent 3: Universal table parser that preserves hierarchical structure and complete names."""
+    prompt = f'''You are an expert at parsing clinical trial tables with PERFECT hierarchical structure preservation.
 
 **STEP 1: CLASSIFY THE TABLE**
 Determine the table type:
@@ -158,51 +158,98 @@ Determine the table type:
 - **Subgroup Analysis:** Results by patient subgroups
 - **Other:** Laboratory values, pharmacokinetics, etc.
 
-**STEP 2: EXTRACT BASED ON TYPE**
+**STEP 2: EXTRACT WITH HIERARCHICAL PRECISION**
 
 **If Baseline/Demographics table:** Return `{{"table_outcomes": []}}`
 
-**If ANY other table type:** Extract everything with these universal rules:
+**If ANY other table type:** Extract with these CRITICAL rules:
 
-1. **Clean Names:** Remove all numbers, percentages, statistical formatting
-   - "Nausea — no. (%)" becomes "Nausea"
-   - "Primary endpoint at 30 days" becomes "Primary endpoint"
+1. **PRESERVE COMPLETE NAMES WITH SMART TIMEPOINT EXTRACTION:**
+   - Keep the FULL text including all qualifiers
+   - "Miscarriage or stillbirth without preeclampsia" stays EXACTLY as is
+   - For timepoint extraction: "Primary endpoint at 30 days" becomes:
+     * outcome_specific: "Primary endpoint" 
+     * timepoint: "30 days"
+   - For gestational timepoints: "Preeclampsia at <37 wk of gestation" becomes:
+     * outcome_specific: "Preeclampsia"
+     * timepoint: "<37 wk of gestation"
+   - Only remove data formatting like "— no. (%)" but keep all descriptive text
 
-2. **Identify Structure:**
-   - Main row headers = outcome_domain
-   - Indented sub-items = outcome_specific
-   - Standalone items = both domain and specific
+2. **TIMEPOINT EXTRACTION PATTERNS:**
+   - "at X days/weeks/months" → extract to timepoint field
+   - "before X weeks" → extract to timepoint field  
+   - "at <X wk" → extract to timepoint field
+   - "within X days" → extract to timepoint field
+   - BUT keep contextual timepoints: "without preeclampsia at 24 weeks" stays complete
 
-3. **Determine Type:**
-   - "safety" for adverse events, side effects, complications
-   - "efficacy" for treatment outcomes, endpoints
-   - "laboratory" for lab values, biomarkers
-   - "other" for miscellaneous
+3. **IDENTIFY HIERARCHICAL STRUCTURE:**
+   - **Main section headers** (often in caps or bold) = outcome_domain
+   - **Sub-items under headers** (often indented) = outcome_specific
+   - **Standalone items** = treat as both domain and specific (leave specific blank)
 
-4. **Extract Everything:** Every row that represents a measured outcome/event
+4. **EXAMPLES OF HIERARCHICAL STRUCTURE:**
+   ```
+   Adverse outcomes at <37 wk of gestation     <- DOMAIN (timepoint: "<37 wk of gestation")
+       Preeclampsia — no. (%)                  <- SPECIFIC: "Preeclampsia"
+       Gestational hypertension — no. (%)      <- SPECIFIC: "Gestational hypertension"
+       Small-for-gestational-age status        <- SPECIFIC: "Small-for-gestational-age status without preeclampsia"
+   
+   Stillbirth or death — no. (%)               <- DOMAIN
+       All stillbirths or deaths               <- SPECIFIC: "All stillbirths or deaths"
+       With preeclampsia or small-for-age      <- SPECIFIC: "With preeclampsia or status of being small for gestational age"
+   ```
+
+5. **PRESERVE ALL QUALIFIERS:** Keep phrases like:
+   - "without preeclampsia" 
+   - "resulting in surgery"
+   - "with confirmed bacteremia"
+   - "treated with surfactant and ventilation"
 
 **OUTPUT FORMAT:** JSON with 'table_outcomes' list:
 {{
-  "outcome_domain": "...",
-  "outcome_specific": "...",
+  "outcome_domain": "Main section header (clean, timepoint extracted if applicable)",
+  "outcome_specific": "Sub-item text (clean, timepoint extracted if applicable) or blank if standalone",
   "outcome_type": "safety/efficacy/laboratory/other",
   "definition": "...",
   "measurement_method": "...",
-  "timepoint": "..."
+  "timepoint": "Extracted timepoint information"
 }}
 
 **TABLE TEXT TO PARSE:**
 {table_text}'''
 
-    return parse_json_response(ask_llm(prompt), "table_outcomes") or []
+    return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "table_outcomes") or []
 
 def agent_finalize_comprehensive_structure(messy_list: list) -> list:
-    """Agent 4: Universal structuring agent that works for any clinical trial data."""
-    prompt = f'''You are a universal clinical trial data structuring expert. Clean and organize this outcome data from ANY clinical trial paper.
+    """Agent 4: Enhanced structuring with intelligent timepoint consolidation."""
+    prompt = f'''You are a clinical trial data structuring expert. Process this outcome data while PRESERVING hierarchical structure, complete outcome names, and intelligently consolidating timepoint information.
 
-**COMPREHENSIVE CLEANING RULES:**
-1. **Deduplicate:** Merge identical outcomes found in multiple places
-2. **Standardize Types:** Ensure consistent categorization:
+**CRITICAL PRESERVATION RULES:**
+1. **Keep Complete Names:** Preserve ALL qualifiers and descriptive text
+   - "Miscarriage or stillbirth without preeclampsia" must stay complete
+   - "Respiratory distress syndrome treated with surfactant and ventilation" must stay complete
+
+2. **Smart Timepoint Consolidation:**
+   - If multiple sources provide timepoint info for same outcome, combine them
+   - Extract clean timepoints: "Primary endpoint at day 30" → outcome: "Primary endpoint", timepoint: "day 30"
+   - But preserve contextual timepoints: "preeclampsia before 34 weeks" might stay as one unit
+   - Consolidate similar timepoints: "30 days", "day 30", "at 30 days" → "30 days"
+
+3. **Preserve Hierarchical Structure:**
+   - If an outcome_domain has multiple outcome_specific items, keep this parent-child relationship
+   - Each specific outcome gets its own row but references the same domain
+   - Inherit domain timepoints to specific outcomes if they don't have their own
+
+4. **Handle Domain-Only Outcomes:**
+   - If something appears as both domain and specific (standalone outcome), create one entry with outcome_specific left blank
+
+5. **Enhanced Merging Logic:**
+   - Only merge if EXACTLY the same outcome (same domain AND same specific)
+   - Intelligently combine timepoints: "at 30 days" + "day 30" → "30 days"
+   - Merge definitions and measurement methods from multiple sources
+   - Keep all unique qualifying information
+
+6. **Standardize Types Consistently:**
    - "primary" for primary endpoints
    - "secondary" for secondary endpoints  
    - "safety" for adverse events, side effects, safety outcomes
@@ -210,21 +257,20 @@ def agent_finalize_comprehensive_structure(messy_list: list) -> list:
    - "exploratory" for exploratory/post-hoc analyses
    - "other" for miscellaneous outcomes
 
-3. **Merge Information:** If same outcome appears multiple times with different details, combine all information
-
-4. **Clean Names:** Remove redundant words, standardize terminology
-
-5. **Structure Hierarchy:** For each unique domain, create proper parent-child relationships
-
-**OUTPUT FORMAT:** JSON with 'final_outcomes' list. Each item must have:
+**OUTPUT STRUCTURE:** Each outcome gets its own row:
 {{
   "outcome_type": "primary/secondary/safety/efficacy/exploratory/other",
-  "outcome_domain": "Main category", 
-  "outcome_specific": "Specific measure or blank if same as domain",
-  "definition": "How outcome is defined",
-  "measurement_method": "How measured",
-  "timepoint": "When measured"
+  "outcome_domain": "Parent category (clean, with timepoints extracted if applicable)",
+  "outcome_specific": "Specific measure (clean, with timepoints extracted if applicable) or blank if domain-only",
+  "definition": "How outcome is defined (consolidated from multiple sources)",
+  "measurement_method": "How measured (consolidated)",
+  "timepoint": "When measured (consolidated and standardized)"
 }}
+
+**TIMEPOINT STANDARDIZATION EXAMPLES:**
+- "at 30 days", "day 30", "30-day" → "30 days"
+- "before 37 weeks", "<37 wk", "prior to 37 weeks" → "before 37 weeks"
+- "at hospital discharge", "discharge", "upon discharge" → "hospital discharge"
 
 **MESSY LIST TO PROCESS:**
 {json.dumps(messy_list, indent=2)}'''
@@ -234,7 +280,7 @@ def agent_finalize_comprehensive_structure(messy_list: list) -> list:
 # ---------- 3. UNIVERSAL TABLE DETECTION ----------
 
 def extract_all_tables(full_text: str) -> list:
-    """Universal table extraction that works for any journal format."""
+    """Enhanced universal table extraction with robust deduplication."""
     # Multiple patterns to catch different table formats
     patterns = [
         r"(Table \d+\..*?)(?=\nTable \d+\.|\nFigure \d+\.|\n\n[A-Z][A-Z\s]+\n|\Z)",  # Standard format
@@ -248,13 +294,29 @@ def extract_all_tables(full_text: str) -> list:
         tables = re.findall(pattern, full_text, re.DOTALL | re.IGNORECASE)
         all_tables.extend(tables)
     
-    # Remove duplicates while preserving order
-    seen = set()
+    # Enhanced deduplication with multiple signature methods
+    seen_signatures = set()
     unique_tables = []
+    
     for table in all_tables:
-        table_clean = re.sub(r'\s+', ' ', table[:100])  # Use first 100 chars as signature
-        if table_clean not in seen:
-            seen.add(table_clean)
+        # Create multiple signatures to catch edge cases
+        signatures = [
+            # Original method: first 100 chars
+            re.sub(r'\s+', ' ', table[:100]),
+            # Table number + first line
+            re.sub(r'\s+', ' ', table[:200].split('\n')[0]) if '\n' in table[:200] else table[:100],
+            # Content-based: first few data rows (skip title)
+            re.sub(r'\s+', ' ', '\n'.join(table.split('\n')[2:4])) if len(table.split('\n')) > 3 else table[:100]
+        ]
+        
+        # Check if any signature has been seen
+        is_duplicate = any(sig in seen_signatures for sig in signatures if sig.strip())
+        
+        if not is_duplicate:
+            # Add all signatures to seen set
+            for sig in signatures:
+                if sig.strip():
+                    seen_signatures.add(sig)
             unique_tables.append(table)
     
     return unique_tables
@@ -334,7 +396,7 @@ if uploaded_file is not None:
                     st.write(f"**Interventions:** {study_metadata.get('interventions_tested', 'Not found')}")
                     st.write(f"**Comparison:** {study_metadata.get('comparison_group', 'Not found')}")
             
-            # Display outcomes by category
+            # Display outcomes with proper hierarchical structure
             st.subheader("🎯 Extracted Outcomes")
             
             df = pd.DataFrame(outcomes)
@@ -348,14 +410,21 @@ if uploaded_file is not None:
                 if not type_outcomes.empty:
                     st.markdown(f"**{outcome_type.upper()} OUTCOMES**")
                     
-                    for _, outcome in type_outcomes.iterrows():
-                        domain = outcome.get('outcome_domain', '')
-                        specific = outcome.get('outcome_specific', '')
+                    # Group by domain to show hierarchical structure
+                    domains = type_outcomes['outcome_domain'].unique()
+                    
+                    for domain in domains:
+                        domain_outcomes = type_outcomes[type_outcomes['outcome_domain'] == domain]
                         
-                        if specific and specific != domain:
-                            st.markdown(f"• **{domain}** - {specific}")
-                        else:
-                            st.markdown(f"• **{domain}**")
+                        # Show domain
+                        st.markdown(f"• **{domain}**")
+                        
+                        # Show specific outcomes under this domain
+                        for _, outcome in domain_outcomes.iterrows():
+                            specific = outcome.get('outcome_specific', '')
+                            if specific and specific.strip():
+                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;◦ {specific}")
+                            # If no specific, the domain itself is the complete outcome
                     
                     st.write("")
             
