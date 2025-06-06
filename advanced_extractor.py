@@ -147,72 +147,86 @@ def agent_locate_all_outcomes(full_text: str) -> list:
     return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "defined_outcomes") or []
 
 def agent_parse_universal_table(table_text: str) -> list:
-    """Agent 3: Universal table parser that preserves hierarchical structure and complete names."""
-    prompt = f'''You are an expert at parsing clinical trial tables with PERFECT hierarchical structure preservation.
+    """Agent 3: Universal table parser that captures TRUE hierarchical structure from tables."""
+    prompt = f'''You are an expert at parsing clinical trial tables with PERFECT hierarchical structure recognition.
+
+**CRITICAL UNDERSTANDING:**
+In clinical trial tables, the structure is typically:
+- **MAIN SECTION HEADERS** (often bold/caps) = outcome_domain
+- **INDENTED SUB-ITEMS** underneath = outcome_specific
 
 **STEP 1: CLASSIFY THE TABLE**
 Determine the table type:
 - **Baseline/Demographics:** Patient characteristics, demographics, medical history
-- **Primary/Secondary Outcomes:** Main study results, efficacy data
+- **Primary/Secondary Outcomes:** Main study results, efficacy data  
 - **Adverse Events/Safety:** Side effects, complications, safety events
 - **Subgroup Analysis:** Results by patient subgroups
 - **Other:** Laboratory values, pharmacokinetics, etc.
 
-**STEP 2: EXTRACT WITH HIERARCHICAL PRECISION**
+**STEP 2: EXTRACT TRUE HIERARCHICAL STRUCTURE**
 
 **If Baseline/Demographics table:** Return `{{"table_outcomes": []}}`
 
-**If ANY other table type:** Extract with these CRITICAL rules:
+**If ANY other table type:** Extract with these PRECISE rules:
 
-1. **PRESERVE COMPLETE NAMES WITH SMART TIMEPOINT EXTRACTION:**
-   - Keep the FULL text including all qualifiers
-   - "Miscarriage or stillbirth without preeclampsia" stays EXACTLY as is
-   - For timepoint extraction: "Primary endpoint at 30 days" becomes:
-     * outcome_specific: "Primary endpoint" 
-     * timepoint: "30 days"
-   - For gestational timepoints: "Preeclampsia at <37 wk of gestation" becomes:
-     * outcome_specific: "Preeclampsia"
-     * timepoint: "<37 wk of gestation"
-   - Only remove data formatting like "— no. (%)" but keep all descriptive text
-
-2. **TIMEPOINT EXTRACTION PATTERNS:**
-   - "at X days/weeks/months" → extract to timepoint field
-   - "before X weeks" → extract to timepoint field  
-   - "at <X wk" → extract to timepoint field
-   - "within X days" → extract to timepoint field
-   - BUT keep contextual timepoints: "without preeclampsia at 24 weeks" stays complete
-
-3. **IDENTIFY HIERARCHICAL STRUCTURE:**
-   - **Main section headers** (often in caps or bold) = outcome_domain
-   - **Sub-items under headers** (often indented) = outcome_specific
-   - **Standalone items** = treat as both domain and specific (leave specific blank)
-
-4. **EXAMPLES OF HIERARCHICAL STRUCTURE:**
+1. **IDENTIFY TRUE HIERARCHY FROM TABLE LAYOUT:**
+   Look for this pattern:
    ```
-   Adverse outcomes at <37 wk of gestation     <- DOMAIN (timepoint: "<37 wk of gestation")
-       Preeclampsia — no. (%)                  <- SPECIFIC: "Preeclampsia"
-       Gestational hypertension — no. (%)      <- SPECIFIC: "Gestational hypertension"
-       Small-for-gestational-age status        <- SPECIFIC: "Small-for-gestational-age status without preeclampsia"
+   Main Header (often bold/caps)               <- This is outcome_domain
+       Sub-item 1 — no. (%)                   <- This is outcome_specific  
+       Sub-item 2 — no. (%)                   <- This is outcome_specific
+       Sub-item 3 — no. (%)                   <- This is outcome_specific
+   Another Main Header                         <- This is outcome_domain
+       Different sub-item — no. (%)           <- This is outcome_specific
+   ```
+
+2. **PRESERVE COMPLETE NAMES INCLUDING ALL QUALIFIERS:**
+   - "Miscarriage or stillbirth without preeclampsia — no. (%)" becomes:
+     * outcome_specific: "Miscarriage or stillbirth without preeclampsia"
+   - "Small-for-gestational-age status without preeclampsia — no./total no. (%)" becomes:
+     * outcome_specific: "Small-for-gestational-age status without preeclampsia"
+
+3. **EXAMPLES OF CORRECT EXTRACTION:**
+   From table text like:
+   ```
+   Adverse outcomes at <37 wk of gestation
+       Any — no. (%)                          79 (9.9)    116 (14.1)
+       Gestational hypertension — no. (%)     8 (1.0)     7 (0.9)
+       Small-for-gestational-age status without preeclampsia — no./total no. (%)  17/785 (2.2)  18/807 (2.2)
+       Miscarriage or stillbirth without preeclampsia — no. (%)  14 (1.8)  19 (2.3)
+   ```
    
-   Stillbirth or death — no. (%)               <- DOMAIN
-       All stillbirths or deaths               <- SPECIFIC: "All stillbirths or deaths"
-       With preeclampsia or small-for-age      <- SPECIFIC: "With preeclampsia or status of being small for gestational age"
-   ```
+   Should extract:
+   - domain="Adverse outcomes at <37 wk of gestation", specific="Any"
+   - domain="Adverse outcomes at <37 wk of gestation", specific="Gestational hypertension"  
+   - domain="Adverse outcomes at <37 wk of gestation", specific="Small-for-gestational-age status without preeclampsia"
+   - domain="Adverse outcomes at <37 wk of gestation", specific="Miscarriage or stillbirth without preeclampsia"
 
-5. **PRESERVE ALL QUALIFIERS:** Keep phrases like:
-   - "without preeclampsia" 
-   - "resulting in surgery"
-   - "with confirmed bacteremia"
-   - "treated with surfactant and ventilation"
+4. **HANDLE NESTED STRUCTURE:**
+   ```
+   Stillbirth or death — no. (%)
+       All stillbirths or deaths              8 (1.0)     14 (1.7)
+       With preeclampsia or status of being small for gestational age  5 (0.6)  8 (1.0)
+       Without preeclampsia or status of being small for gestational age  3 (0.4)  6 (0.7)
+   ```
+   
+   Should extract:
+   - domain="Stillbirth or death", specific="All stillbirths or deaths"
+   - domain="Stillbirth or death", specific="With preeclampsia or status of being small for gestational age"
+   - domain="Stillbirth or death", specific="Without preeclampsia or status of being small for gestational age"
+
+5. **SMART TIMEPOINT EXTRACTION:**
+   - Extract timepoints from domain names: "Adverse outcomes at <37 wk of gestation" → timepoint: "<37 wk of gestation"
+   - Clean outcome names but preserve all qualifiers
 
 **OUTPUT FORMAT:** JSON with 'table_outcomes' list:
 {{
-  "outcome_domain": "Main section header (clean, timepoint extracted if applicable)",
-  "outcome_specific": "Sub-item text (clean, timepoint extracted if applicable) or blank if standalone",
+  "outcome_domain": "Exact main section header (timepoint extracted if applicable)",
+  "outcome_specific": "Exact sub-item text (complete with all qualifiers)",
   "outcome_type": "safety/efficacy/laboratory/other",
   "definition": "...",
   "measurement_method": "...",
-  "timepoint": "Extracted timepoint information"
+  "timepoint": "Extracted timepoint or from domain"
 }}
 
 **TABLE TEXT TO PARSE:**
@@ -221,35 +235,35 @@ Determine the table type:
     return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "table_outcomes") or []
 
 def agent_finalize_comprehensive_structure(messy_list: list) -> list:
-    """Agent 4: Enhanced structuring with intelligent timepoint consolidation."""
-    prompt = f'''You are a clinical trial data structuring expert. Process this outcome data while PRESERVING hierarchical structure, complete outcome names, and intelligently consolidating timepoint information.
+    """Agent 4: Enhanced structuring that PRESERVES exact hierarchical relationships and complete names."""
+    prompt = f'''You are a clinical trial data structuring expert. Your job is to clean and organize while PRESERVING the exact hierarchical structure and complete outcome names.
 
 **CRITICAL PRESERVATION RULES:**
-1. **Keep Complete Names:** Preserve ALL qualifiers and descriptive text
-   - "Miscarriage or stillbirth without preeclampsia" must stay complete
-   - "Respiratory distress syndrome treated with surfactant and ventilation" must stay complete
 
-2. **Smart Timepoint Consolidation:**
-   - If multiple sources provide timepoint info for same outcome, combine them
-   - Extract clean timepoints: "Primary endpoint at day 30" → outcome: "Primary endpoint", timepoint: "day 30"
-   - But preserve contextual timepoints: "preeclampsia before 34 weeks" might stay as one unit
-   - Consolidate similar timepoints: "30 days", "day 30", "at 30 days" → "30 days"
+1. **PRESERVE EXACT HIERARCHICAL STRUCTURE:**
+   - Keep domain-specific relationships EXACTLY as extracted
+   - "Adverse outcomes at <37 wk of gestation" should remain as domain with its specific sub-outcomes
+   - "Stillbirth or death" should remain as domain with its specific sub-outcomes
+   - DO NOT create generic domains like "Adverse outcomes" or "Neonatal outcomes"
 
-3. **Preserve Hierarchical Structure:**
-   - If an outcome_domain has multiple outcome_specific items, keep this parent-child relationship
-   - Each specific outcome gets its own row but references the same domain
+2. **PRESERVE COMPLETE OUTCOME NAMES:**
+   - "Miscarriage or stillbirth without preeclampsia" must stay EXACTLY as is
+   - "Small-for-gestational-age status without preeclampsia" must stay EXACTLY as is
+   - "With preeclampsia or status of being small for gestational age" must stay EXACTLY as is
+   - DO NOT truncate or simplify these names
+
+3. **MINIMAL CLEANING ONLY:**
+   - Only remove obvious formatting artifacts like "— no. (%)" 
+   - Only standardize obvious duplicates (same domain AND same specific)
+   - DO NOT change or simplify outcome names
+   - DO NOT merge different domains together
+
+4. **PRESERVE TIMEPOINT INFORMATION:**
+   - Keep timepoints from domain names: "at <37 wk of gestation" 
    - Inherit domain timepoints to specific outcomes if they don't have their own
+   - Standardize format: "<37 wk" → "<37 weeks of gestation"
 
-4. **Handle Domain-Only Outcomes:**
-   - If something appears as both domain and specific (standalone outcome), create one entry with outcome_specific left blank
-
-5. **Enhanced Merging Logic:**
-   - Only merge if EXACTLY the same outcome (same domain AND same specific)
-   - Intelligently combine timepoints: "at 30 days" + "day 30" → "30 days"
-   - Merge definitions and measurement methods from multiple sources
-   - Keep all unique qualifying information
-
-6. **Standardize Types Consistently:**
+5. **OUTCOME TYPE ASSIGNMENT:**
    - "primary" for primary endpoints
    - "secondary" for secondary endpoints  
    - "safety" for adverse events, side effects, safety outcomes
@@ -257,20 +271,29 @@ def agent_finalize_comprehensive_structure(messy_list: list) -> list:
    - "exploratory" for exploratory/post-hoc analyses
    - "other" for miscellaneous outcomes
 
-**OUTPUT STRUCTURE:** Each outcome gets its own row:
+**FORBIDDEN ACTIONS:**
+- DO NOT create generic domain names
+- DO NOT truncate outcome names 
+- DO NOT merge different domains
+- DO NOT simplify medical terminology
+
+**OUTPUT STRUCTURE:** Each outcome gets its own row preserving EXACT structure:
 {{
   "outcome_type": "primary/secondary/safety/efficacy/exploratory/other",
-  "outcome_domain": "Parent category (clean, with timepoints extracted if applicable)",
-  "outcome_specific": "Specific measure (clean, with timepoints extracted if applicable) or blank if domain-only",
+  "outcome_domain": "EXACT domain name as extracted",
+  "outcome_specific": "EXACT specific name as extracted", 
   "definition": "How outcome is defined (consolidated from multiple sources)",
   "measurement_method": "How measured (consolidated)",
-  "timepoint": "When measured (consolidated and standardized)"
+  "timepoint": "When measured (inherited from domain if applicable)"
 }}
 
-**TIMEPOINT STANDARDIZATION EXAMPLES:**
-- "at 30 days", "day 30", "30-day" → "30 days"
-- "before 37 weeks", "<37 wk", "prior to 37 weeks" → "before 37 weeks"
-- "at hospital discharge", "discharge", "upon discharge" → "hospital discharge"
+**EXAMPLE OF CORRECT PRESERVATION:**
+Input data with domain "Adverse outcomes at <37 wk of gestation" and specific "Miscarriage or stillbirth without preeclampsia"
+
+Output: 
+- outcome_domain: "Adverse outcomes at <37 wk of gestation"
+- outcome_specific: "Miscarriage or stillbirth without preeclampsia"
+- timepoint: "<37 weeks of gestation"
 
 **MESSY LIST TO PROCESS:**
 {json.dumps(messy_list, indent=2)}'''
