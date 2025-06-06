@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v5.1 - final UI fix) --------
+# -------- advanced_extractor.py (v6.0 - final version) --------
 
 import os
 import json
@@ -20,6 +20,7 @@ client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_K
 
 def pdf_to_text(file):
     """Extracts text from an uploaded PDF file."""
+    # This function is not cached as it reads from a file object which can change.
     try:
         with pdfplumber.open(file) as pdf:
             full_text = "\n\n".join(p.extract_text() or "" for p in pdf.pages)
@@ -129,11 +130,18 @@ def agent_synthesize_and_verify(defined_outcomes: list, table_outcomes: list) ->
 
 # ---------- 3. MAIN ORCHESTRATION PIPELINE ----------
 
-def run_extraction_pipeline(file):
-    """Orchestrates the entire multi-agent extraction process."""
-    full_text = pdf_to_text(file)
-    if not full_text:
-        return None, None
+@st.cache_data
+def run_extraction_pipeline(_file_contents, file_name):
+    """
+    Orchestrates the entire multi-agent extraction process.
+    This function is cached to prevent re-running on the same file.
+    Note: We pass file_contents and file_name instead of the file object itself
+    because file objects are not hashable for caching.
+    """
+    st.write("--- Running Extraction Pipeline ---")
+    
+    # Recreate a text representation from the bytes for the functions
+    full_text = _file_contents.decode("utf-8", errors="ignore")
 
     study_info = agent_extract_metadata(full_text)
     defined_outcomes = agent_locate_defined_outcomes(full_text)
@@ -167,28 +175,23 @@ st.markdown("This tool uses a multi-agent AI workflow with a dedicated table par
 file = st.file_uploader("Upload a PDF clinical trial report", type="pdf")
 
 if file:
-    # Initialize variables to hold the results
-    study_info = None
-    outcomes = None
+    # To make caching work, we read the file's contents and name once.
+    file_contents = file.getvalue()
+    file_name = file.name
 
-    # Use st.status for processing; it will automatically disappear on completion
-    with st.status(f"Processing {file.name}...", expanded=True) as status:
-        study_info, outcomes = run_extraction_pipeline(file)
-        if outcomes:
-            status.update(label="Processing complete!", state="complete")
-        else:
-            status.update(label="Extraction failed or no outcomes found.", state="error")
+    # The main processing is now called inside a status context
+    with st.spinner(f"Processing {file_name}..."):
+        study_info, outcomes = run_extraction_pipeline(file_contents, file_name)
 
-    # Display results OUTSIDE of the st.status block to avoid nesting errors
+    # The display logic happens outside the spinner/status
     if outcomes:
+        st.success(f"Processing complete! Successfully extracted data from {file_name}.")
         df = pd.DataFrame(outcomes)
         # Ensure we have the necessary columns, fill with empty string if not
-        for col in ['outcome_domain', 'outcome_specific', 'outcome_type']:
+        for col in ['outcome_domain', 'outcome_specific', 'outcome_type', 'definition', 'timepoint']:
             if col not in df.columns:
                 df[col] = ''
         df.fillna('', inplace=True)
-
-        st.success(f"Successfully extracted {len(df['outcome_domain'].unique())} domains and {len(df[df['outcome_type'] == 'specific'])} specific outcomes.")
 
         # HIERARCHICAL DISPLAY
         st.subheader("Hierarchical Outcome View")
@@ -210,30 +213,55 @@ if file:
             st.write("") 
 
         # DATA EXPORT & FULL TABLE
+        st.subheader("Export Results")
+
+        # --- Create Simplified CSV ---
+        simplified_rows = []
+        for domain in domains:
+            simplified_rows.append({"Level": "DOMAIN", "Outcome": domain})
+            specific_outcomes = df[
+                (df['outcome_domain'] == domain) & 
+                (df['outcome_specific'] != '') &
+                (df['outcome_specific'] != domain) 
+            ]['outcome_specific'].unique()
+            for specific in specific_outcomes:
+                simplified_rows.append({"Level": "Specific", "Outcome": f"  • {specific}"})
+        simplified_df = pd.DataFrame(simplified_rows)
+
+        col1, col2 = st.columns(2)
+        with col1:
+             st.download_button(
+                label="Download Simplified View",
+                data=simplified_df.to_csv(index=False).encode('utf-8'),
+                file_name=f"simplified_outcomes_{file_name}.csv",
+                mime='text/csv',
+                help="A clean, human-readable list of the outcome hierarchy."
+            )
+        
+        # --- Create Full Data CSV ---
         final_rows = []
         if not study_info: study_info = {}
-        study_info["pdf_name"] = file.name
+        study_info["pdf_name"] = file_name
         for _, row in df.iterrows():
             new_row = study_info.copy()
             new_row.update(row.to_dict())
             final_rows.append(new_row)
         final_df = pd.DataFrame(final_rows)
 
-        st.subheader("Export Results")
-        st.download_button(
-            "Download Extracted Data as CSV",
-            final_df.to_csv(index=False).encode('utf-8'),
-            f"extracted_outcomes_{file.name}.csv",
-            "text/csv",
-            key='download-csv'
-        )
+        with col2:
+            st.download_button(
+                label="Download Full Data",
+                data=final_df.to_csv(index=False).encode('utf-8'),
+                file_name=f"full_data_{file_name}.csv",
+                mime='text/csv',
+                help="The complete raw data with all metadata repeated for each outcome, useful for analysis."
+            )
         
-        with st.expander("Show Full Data Table"):
+        with st.expander("Show Full Raw Data Table"):
             st.dataframe(final_df)
         
         with st.expander("Show Extracted Study Information"):
             st.json(study_info)
 
     elif file and not outcomes:
-        # This message shows if the run completes but the 'outcomes' list is empty
         st.error("Could not extract any outcomes. The document may be unreadable or contain no recognized outcome patterns.")
