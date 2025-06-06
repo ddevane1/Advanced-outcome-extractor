@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 
 """
-Universal Clinical‑Trial Data Extractor – **v12.6**
+Universal Clinical‑Trial Data Extractor – **v12.7**
 ──────────────────────────────────────────────────
-Hot‑fix: eliminates the *unterminated string literal* introduced by the multiline
-regex in **find_tables()**.
+Crash‑proofing release.
 
-### What changed
-* **Single‑line regex** – `pat` is now one continuous raw‑string literal:
-  ```python
-  pat = r"(Table\s+\d+\..*?)(?=\n(?:Table\s+\d+\.|Figure\s+\d+\.|$))"
-  ```
-  This matches the same patterns (next Table, next Figure, or end of text) but
-  is legal Python syntax.
-* **Version bump** – everything else is identical to 12.5.
+### Fixes
+1. **`clean_label()` accepts lists / dicts** – The LLM occasionally returns a
+   list (e.g. `["A", "B"]`) instead of a plain string.  We now coerce any
+   non‑string into readable text **before** applying regexes, preventing the
+   `TypeError: expected string or bytes‑like object` crash.
+2. **Guaranteed DataFrame columns** – after converting `outs` to `df`, we add
+   placeholder columns (`"outcome_domain"`, `"outcome_specific"`) if missing so
+   `.groupby()` never raises a `KeyError`.
+3. **Early‑exit safety** – if `df` ends up empty, we skip the grouping block and
+   show a friendly info message instead.
+
+No other behaviour changes.
 """
 
 import os
@@ -76,11 +79,23 @@ def parse_json(text: str, key: str | None = None):
         st.warning("LLM did not return valid JSON.")
         return None
 
-# ---------- 2. STAT‑SUFFIX SCRUBBER -------------
+# ---------- 2. UTILS ----------
 
-def clean_label(label: str) -> str:
-    if not label:
-        return label
+def to_plain(val):
+    """Coerce lists / dicts / None into a printable string."""
+    if val is None:
+        return ""
+    if isinstance(val, str):
+        return val
+    if isinstance(val, (list, tuple)):
+        return "; ".join(map(str, val))
+    if isinstance(val, dict):
+        return json.dumps(val, ensure_ascii=False)
+    return str(val)
+
+
+def clean_label(label):
+    label = to_plain(label)
     label = re.sub(r"\s*[–—-]\s*(no\.|events|cases).*", "", label, flags=re.I)
     label = re.sub(r"\s*\(\d+(?:\.\d+)?%?\)$", "", label)
     return label.strip()
@@ -155,8 +170,8 @@ def run_pipeline(txt: str):
     finals = agent_finalize(finals_raw) if finals_raw else []
 
     for obj in finals:
-        domain = clean_label(obj.get("outcome_domain", ""))
-        specific = clean_label(obj.get("outcome_specific", ""))
+        domain = clean_label(obj.get("outcome_domain"))
+        specific = clean_label(obj.get("outcome_specific"))
         if not domain and not specific:
             domain = specific = "Unlabelled"
         obj["outcome_domain"] = domain or "Unlabelled"
@@ -166,7 +181,7 @@ def run_pipeline(txt: str):
 # ---------- 6. STREAMLIT UI ----------
 
 st.set_page_config(layout="wide")
-st.title("Universal Clinical‑Trial Extractor v12.6")
+st.title("Universal Clinical‑Trial Extractor v12.7 (stable)")
 
 pdf = st.file_uploader("Upload a clinical‑trial PDF", type="pdf")
 if pdf:
@@ -184,10 +199,18 @@ if pdf:
     st.subheader("Extracted outcomes")
     if outs:
         df = pd.DataFrame(outs)
-        for domain, grp in df.groupby("outcome_domain", dropna=False):
-            st.markdown(f"• **{domain}**")
-            for _, row in grp.iterrows():
-                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;◦ {row['outcome_specific']}")
+        # Ensure essential columns
+        for col in ("outcome_domain", "outcome_specific"):
+            if col not in df.columns:
+                df[col] = "Unlabelled"
+        if not df.empty:
+            for domain, grp in df.groupby("outcome_domain", dropna=False):
+                st.markdown(f"• **{domain}**")
+                for _, row in grp.iterrows():
+                    st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;◦ {row['outcome_specific']}")
+        else:
+            st.info("No rows to display after cleaning.")
+
         with st.expander("🛠 Raw LLM output"):
             st.json(outs)
 
