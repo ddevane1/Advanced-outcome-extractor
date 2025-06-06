@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v17.0 – Final, High-Quality) --------
+# -------- advanced_extractor.py (v17.1 – Final Import Fix) --------
 """
 Clinical-Trial Outcome Extractor
-Patch notes v17.0
-- Restored detailed, example-driven prompts to all AI agents for high-quality extraction.
-- Combined the robust stability of the v16 architecture with the detailed logic of earlier versions.
-- This version is designed to be the final, production-ready script.
+Patch notes v17.1
+- Re-added the missing 'import pdfplumber' statement to fix the NameError.
 """
 
 import os
 import json
 import re
 import io
+import pdfplumber  # <-- THIS LINE WAS MISSING. IT IS NOW FIXED.
 import pandas as pd
 import streamlit as st
 from openai import OpenAI
@@ -133,7 +132,7 @@ MESSY LIST TO PROCESS:
 
 # ---------- 3. MAIN ORCHESTRATION PIPELINE ----------
 
-@st.cache_data(show_spinner="Step 2 / 3 – running AI extraction pipeline…")
+@st.cache_data(show_spinner="Step 2 / 3 – Running AI extraction pipeline…")
 def run_extraction_pipeline(full_text: str):
     """Orchestrate the calls to the four specialist agents."""
     study_info = agent_extract_metadata(full_text)
@@ -154,8 +153,8 @@ def run_extraction_pipeline(full_text: str):
 
 # ---------- 4. STREAMLIT UI ----------
 
-st.set_page_config(layout="wide", page_title="Clinical Trial Outcome Extractor v17.0")
-st.title("Clinical-Trial Outcome Extractor (v17.0)")
+st.set_page_config(layout="wide", page_title="Clinical Trial Outcome Extractor v17.1")
+st.title("Clinical-Trial Outcome Extractor (v17.1)")
 st.markdown("This tool uses a cached, multi-agent AI workflow to accurately and reliably extract outcomes from PDF clinical-trial reports.")
 
 uploaded_file = st.file_uploader("Upload a PDF clinical-trial report to begin", type="pdf")
