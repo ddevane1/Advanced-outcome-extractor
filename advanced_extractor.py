@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v5.0 - final polishing) --------
+# -------- advanced_extractor.py (v5.1 - final UI fix) --------
 
 import os
 import json
@@ -96,7 +96,7 @@ def agent_parse_table(table_text: str) -> list:
         "First, determine if this table describes **baseline patient characteristics** (demographics, age, etc.) or **clinical trial outcomes** (results, events, complications).\n\n"
         "**STEP 2: EXTRACT BASED ON CLASSIFICATION**\n"
         "-   **If BASELINE table**, you MUST return an empty list: `{\"table_outcomes\": []}`\n"
-        "-   **If, and ONLY IF, it is an OUTCOME table**, proceed with the rules below.\n\n"
+        "-   **If, and ONLY IF, it is an OUTCOME table**, proceed with the extraction rules below.\n\n"
         "**CLINICAL OUTCOME TABLE PARSING RULES:**\n"
         "1.  **Extract Clean Names:** The outcome name is the text description ONLY. You **MUST STRIP AWAY** all trailing data, numbers, percentages, and formatting like '— no. (%)'. For example, if the line is 'Preeclampsia — no. (%) ... 3 (0.4)', the outcome name is just 'Preeclampsia'.\n"
         "2.  **Identify the Domain:** The main heading for a group of outcomes is the 'outcome_domain'.\n"
@@ -116,7 +116,7 @@ def agent_synthesize_and_verify(defined_outcomes: list, table_outcomes: list) ->
         "1. `defined_outcomes`: Outcomes defined in the text.\n"
         "2. `table_outcomes`: Cleaned outcomes parsed from tables.\n\n"
         "Combine these lists, prioritizing the hierarchy from the `table_outcomes`. Match definitions from `defined_outcomes` to the corresponding items. "
-        "Return a JSON object with a key 'final_outcomes'. Each item must have keys: "
+        "Return a final JSON object with a key 'final_outcomes'. Each item must have keys: "
         "'outcome_type', 'outcome_domain', 'outcome_specific', 'definition', 'measurement_method', 'timepoint'.\n"
         "Create 'domain' type entries and 'specific' type entries.\n\n"
         f"defined_outcomes = {json.dumps(defined_outcomes)}\n\n"
@@ -167,66 +167,73 @@ st.markdown("This tool uses a multi-agent AI workflow with a dedicated table par
 file = st.file_uploader("Upload a PDF clinical trial report", type="pdf")
 
 if file:
+    # Initialize variables to hold the results
+    study_info = None
+    outcomes = None
+
+    # Use st.status for processing; it will automatically disappear on completion
     with st.status(f"Processing {file.name}...", expanded=True) as status:
         study_info, outcomes = run_extraction_pipeline(file)
-
         if outcomes:
-            status.update(label="Processing complete!", state="complete", expanded=False)
-            
-            df = pd.DataFrame(outcomes)
-            # Ensure we have the necessary columns, fill with empty string if not
-            for col in ['outcome_domain', 'outcome_specific', 'outcome_type']:
-                if col not in df.columns:
-                    df[col] = ''
-            df.fillna('', inplace=True)
-
-            # --- NEW HIERARCHICAL DISPLAY ---
-            st.subheader("Hierarchical Outcome View")
-            domains = df[df['outcome_domain'] != '']['outcome_domain'].unique()
-
-            for domain in domains:
-                st.markdown(f"**DOMAIN:** {domain}")
-                # Get specific outcomes for this domain
-                specific_outcomes = df[
-                    (df['outcome_domain'] == domain) & 
-                    (df['outcome_specific'] != '') &
-                    # Avoid printing the domain name as its own specific outcome
-                    (df['outcome_specific'] != domain) 
-                ]['outcome_specific'].unique()
-
-                if len(specific_outcomes) > 0:
-                    for specific in specific_outcomes:
-                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• {specific}")
-                else:
-                    # Handle cases where a domain is listed but has no specific sub-outcomes in the final data
-                    st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• *No specific outcomes listed under this domain.*")
-                st.write("") # Add a little space
-
-            # --- DATA EXPORT & FULL TABLE ---
-            final_rows = []
-            if not study_info: study_info = {}
-            study_info["pdf_name"] = file.name
-            for _, row in df.iterrows():
-                new_row = study_info.copy()
-                new_row.update(row.to_dict())
-                final_rows.append(new_row)
-            final_df = pd.DataFrame(final_rows)
-
-            st.subheader("Export Results")
-            st.download_button(
-                "Download Extracted Data as CSV",
-                final_df.to_csv(index=False).encode('utf-8'),
-                f"extracted_outcomes_{file.name}.csv",
-                "text/csv",
-                key='download-csv'
-            )
-            
-            with st.expander("Show Full Data Table"):
-                st.dataframe(final_df)
-            
-            with st.expander("Show Extracted Study Information"):
-                st.json(study_info)
-
+            status.update(label="Processing complete!", state="complete")
         else:
-            status.update(label="Extraction Failed", state="error", expanded=True)
-            st.error("Could not extract any outcomes. The document may be unreadable or contain no recognized outcome patterns.")
+            status.update(label="Extraction failed or no outcomes found.", state="error")
+
+    # Display results OUTSIDE of the st.status block to avoid nesting errors
+    if outcomes:
+        df = pd.DataFrame(outcomes)
+        # Ensure we have the necessary columns, fill with empty string if not
+        for col in ['outcome_domain', 'outcome_specific', 'outcome_type']:
+            if col not in df.columns:
+                df[col] = ''
+        df.fillna('', inplace=True)
+
+        st.success(f"Successfully extracted {len(df['outcome_domain'].unique())} domains and {len(df[df['outcome_type'] == 'specific'])} specific outcomes.")
+
+        # HIERARCHICAL DISPLAY
+        st.subheader("Hierarchical Outcome View")
+        domains = df[df['outcome_domain'] != '']['outcome_domain'].unique()
+
+        for domain in domains:
+            st.markdown(f"**DOMAIN:** {domain}")
+            specific_outcomes = df[
+                (df['outcome_domain'] == domain) & 
+                (df['outcome_specific'] != '') &
+                (df['outcome_specific'] != domain) 
+            ]['outcome_specific'].unique()
+
+            if len(specific_outcomes) > 0:
+                for specific in specific_outcomes:
+                    st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• {specific}")
+            else:
+                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• *This is a primary outcome or a domain with no specific sub-outcomes listed.*")
+            st.write("") 
+
+        # DATA EXPORT & FULL TABLE
+        final_rows = []
+        if not study_info: study_info = {}
+        study_info["pdf_name"] = file.name
+        for _, row in df.iterrows():
+            new_row = study_info.copy()
+            new_row.update(row.to_dict())
+            final_rows.append(new_row)
+        final_df = pd.DataFrame(final_rows)
+
+        st.subheader("Export Results")
+        st.download_button(
+            "Download Extracted Data as CSV",
+            final_df.to_csv(index=False).encode('utf-8'),
+            f"extracted_outcomes_{file.name}.csv",
+            "text/csv",
+            key='download-csv'
+        )
+        
+        with st.expander("Show Full Data Table"):
+            st.dataframe(final_df)
+        
+        with st.expander("Show Extracted Study Information"):
+            st.json(study_info)
+
+    elif file and not outcomes:
+        # This message shows if the run completes but the 'outcomes' list is empty
+        st.error("Could not extract any outcomes. The document may be unreadable or contain no recognized outcome patterns.")
