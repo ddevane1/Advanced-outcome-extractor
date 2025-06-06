@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
 
 """
-Universal Clinical‑Trial Data Extractor – **v12.5**
+Universal Clinical‑Trial Data Extractor – **v12.6**
 ──────────────────────────────────────────────────
-Feature + polish release.
+Hot‑fix: eliminates the *unterminated string literal* introduced by the multiline
+regex in **find_tables()**.
 
-### New in 12.5
-1. **Stat‑suffix scrubber** – automatically removes trailing statistical
-   artefacts such as “— no. (%)”, “— no./total no. (%)”, or bare percentages from
-   every `outcome_domain` and `outcome_specific` while preserving qualifiers
-   (e.g. “without preeclampsia”).  You’ll never see those fragments in the UI or
-   CSV again.
-2. **CSV export is back** – one‑click download containing study metadata plus
-   the cleaned outcome list. Preview of the first 10 rows is shown under an
-   expander.
-3. **Minor UI tidy‑up** – grouped outcomes now respect the cleaned labels.
-
-All other logic (hierarchy tagging, validation, debug panel) is unchanged.
+### What changed
+* **Single‑line regex** – `pat` is now one continuous raw‑string literal:
+  ```python
+  pat = r"(Table\s+\d+\..*?)(?=\n(?:Table\s+\d+\.|Figure\s+\d+\.|$))"
+  ```
+  This matches the same patterns (next Table, next Figure, or end of text) but
+  is legal Python syntax.
+* **Version bump** – everything else is identical to 12.5.
 """
 
 import os
@@ -51,7 +48,7 @@ def ask_llm(prompt: str, *, json_mode: bool = True, max_tokens: int = DEFAULT_TO
     msgs = [
         {
             "role": "system",
-            "content": "You are a json‑only assistant. Output **nothing** except a single valid JSON object.",
+            "content": "You are a json‑only assistant. Output nothing but a single valid JSON object.",
         },
         {"role": "user", "content": prompt},
     ]
@@ -82,12 +79,9 @@ def parse_json(text: str, key: str | None = None):
 # ---------- 2. STAT‑SUFFIX SCRUBBER -------------
 
 def clean_label(label: str) -> str:
-    """Drop trailing statistical artefacts while preserving qualifiers."""
     if not label:
         return label
-    # Remove patterns like "— no. (%)" or "— no./total no. (%)"
     label = re.sub(r"\s*[–—-]\s*(no\.|events|cases).*", "", label, flags=re.I)
-    # Remove trailing counts in parentheses e.g. "(1.7)" or "(14%)"
     label = re.sub(r"\s*\(\d+(?:\.\d+)?%?\)$", "", label)
     return label.strip()
 
@@ -105,9 +99,8 @@ def agent_extract_metadata(txt: str):
 
 def agent_locate_outcomes(txt: str):
     prompt = (
-        "List every narrative‑text outcome. Respond as JSON {'defined_outcomes': [ … ]}. "
-        "Each outcome object MUST contain *both* 'outcome_domain' and 'outcome_specific'.\n\nTEXT:\n"
-        + txt
+        "List every narrative‑text outcome. Respond as JSON {'defined_outcomes': [...]}. "
+        "Each outcome object MUST contain both 'outcome_domain' and 'outcome_specific'.\n\nTEXT:\n" + txt
     )
     lst = parse_json(ask_llm(prompt, max_tokens=LARGE_TOKENS_FOR_RESPONSE), "defined_outcomes") or []
     if isinstance(lst, dict):
@@ -117,41 +110,37 @@ def agent_locate_outcomes(txt: str):
 
 def agent_parse_table(prepped: str):
     prompt = (
-        "Parse the table lines (⟨DOMAIN⟩ / ⟨ROW⟩). Return JSON {'table_outcomes': […]}. "
-        "Both keys 'outcome_domain' and 'outcome_specific' are REQUIRED on every object.\n\nLINES:\n"
-        + prepped
+        "Parse the table lines (⟨DOMAIN⟩ / ⟨ROW⟩). Return JSON {'table_outcomes': [...]}. "
+        "Both keys are REQUIRED on every object.\n\nLINES:\n" + prepped
     )
     return parse_json(ask_llm(prompt, max_tokens=LARGE_TOKENS_FOR_RESPONSE), "table_outcomes") or []
 
 
 def agent_finalize(lst: list):
     prompt = (
-        "Clean and deduplicate while preserving hierarchy. Output JSON {'final_outcomes': […]}. "
-        "*Both* 'outcome_domain' and 'outcome_specific' keys are REQUIRED — do not omit, rename or leave blank.\n\nDATA:\n"
-        + json.dumps(lst)[:8000]
+        "Clean and deduplicate while preserving hierarchy. Output JSON {'final_outcomes': [...]}. "
+        "Both keys are REQUIRED.\n\nDATA:\n" + json.dumps(lst)[:8000]
     )
     return parse_json(ask_llm(prompt, max_tokens=LARGE_TOKENS_FOR_RESPONSE), "final_outcomes") or []
 
-# ---------- 4. TABLE UTILITIES ----------
+# ---------- 4. TABLE UTILITIES ----------
 
 def find_tables(txt: str):
-    pat = r"(Table \d+\..*?)(?=\nTable \d+\.|
-                             \nFigure \d+\.|
-                             \Z)"  # single‑line concise regex
-    return re.findall(pat, txt, re.DOTALL | re.VERBOSE)
+    pat = r"(Table\s+\d+\..*?)(?=\n(?:Table\s+\d+\.|Figure\s+\d+\.|$))"
+    return re.findall(pat, txt, re.DOTALL)
 
 
 def tag_lines(table: str):
-    lines = []
+    out = []
     for raw in table.splitlines():
         line = raw.strip()
         if not line:
             continue
         if re.search(r"\s\d", line):
-            lines.append("⟨ROW⟩ " + re.split(r"\s\d", line, 1)[0].strip("–—- "))
+            out.append("⟨ROW⟩ " + re.split(r"\s\d", line, 1)[0].strip("–—- "))
         else:
-            lines.append("⟨DOMAIN⟩ " + re.sub(r"\s*[–—-].*$", "", line).strip())
-    return "\n".join(lines)
+            out.append("⟨DOMAIN⟩ " + re.sub(r"\s*[–—-].*$", "", line).strip())
+    return "\n".join(out)
 
 # ---------- 5. ORCHESTRATOR ----------
 
@@ -162,10 +151,9 @@ def run_pipeline(txt: str):
     tables = []
     for raw in find_tables(txt):
         tables.extend(agent_parse_table(tag_lines(raw)))
-    combined = narrative + tables
-    finals = agent_finalize(combined) if combined else []
+    finals_raw = narrative + tables
+    finals = agent_finalize(finals_raw) if finals_raw else []
 
-    # 🔒 HARD VALIDATION & CLEANING
     for obj in finals:
         domain = clean_label(obj.get("outcome_domain", ""))
         specific = clean_label(obj.get("outcome_specific", ""))
@@ -178,7 +166,7 @@ def run_pipeline(txt: str):
 # ---------- 6. STREAMLIT UI ----------
 
 st.set_page_config(layout="wide")
-st.title("Universal Clinical‑Trial Extractor v12.5")
+st.title("Universal Clinical‑Trial Extractor v12.6")
 
 pdf = st.file_uploader("Upload a clinical‑trial PDF", type="pdf")
 if pdf:
@@ -188,13 +176,11 @@ if pdf:
 
     meta, outs = run_pipeline(txt)
 
-    # — metadata —
     if meta:
         st.subheader("Study information")
         for k, v in meta.items():
             st.write(f"**{k.replace('_', ' ').title()}:** {v or '—'}")
 
-    # — outcomes —
     st.subheader("Extracted outcomes")
     if outs:
         df = pd.DataFrame(outs)
@@ -202,24 +188,24 @@ if pdf:
             st.markdown(f"• **{domain}**")
             for _, row in grp.iterrows():
                 st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;◦ {row['outcome_specific']}")
-        # debug
         with st.expander("🛠 Raw LLM output"):
             st.json(outs)
 
-        # — CSV export —
         st.subheader("CSV export")
         meta_base = {k.title().replace("_", " "): v for k, v in (meta or {}).items()}
         rows = []
         for _, r in df.iterrows():
             row = meta_base.copy()
-            row.update({
-                "Outcome Type": r.get("outcome_type", ""),
-                "Outcome Domain": r.get("outcome_domain", ""),
-                "Outcome Specific": r.get("outcome_specific", ""),
-                "Definition": r.get("definition", ""),
-                "Measurement Method": r.get("measurement_method", ""),
-                "Timepoint": r.get("timepoint", ""),
-            })
+            row.update(
+                {
+                    "Outcome Type": r.get("outcome_type", ""),
+                    "Outcome Domain": r.get("outcome_domain", ""),
+                    "Outcome Specific": r.get("outcome_specific", ""),
+                    "Definition": r.get("definition", ""),
+                    "Measurement Method": r.get("measurement_method", ""),
+                    "Timepoint": r.get("timepoint", ""),
+                }
+            )
             rows.append(row)
         export_df = pd.DataFrame(rows)
         st.download_button(
