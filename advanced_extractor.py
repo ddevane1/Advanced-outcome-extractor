@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v2.3 - final verified) --------
+# -------- advanced_extractor.py (v4.0 - dedicated table parser) --------
 
 import os
 import json
+import re
 import streamlit as st
 import pandas as pd
 import pdfplumber
@@ -62,180 +63,74 @@ def parse_json_response(response_text: str, key: str):
 # ---------- 2. SPECIALIZED AGENT FUNCTIONS ----------
 
 def agent_map_document_sections(full_text: str) -> dict:
-    """Agent 1: Scans the text to identify the boundaries of key sections."""
-    prompt = (
-        "You are a document analysis expert. Your task is to identify the key sections of this clinical trial paper. "
-        "Find the start of the 'Abstract', 'Methods' (or similar like 'Patients and Methods'), and 'Results' sections. "
-        "Also identify the start of the 'Tables' section if present.\n\n"
-        "Return a JSON object with keys 'abstract_start', 'methods_start', 'results_start', 'tables_start'. If a section is not found, use null.\n\n"
-        f"Document Text:\n{full_text[:12000]}"
-    )
+    """Agent 1: Scans the text to identify key sections."""
     st.write("↳ Agent 1: Mapping document structure...")
-    response = ask_llm(prompt)
-    section_map = parse_json_response(response, None)
-    if section_map and any(section_map.values()):
-        st.success("✓ Document sections mapped successfully.")
-        return section_map
-    else:
-        st.warning("✗ Failed to map document sections. The document may have a non-standard format.")
-        return None
+    # This agent's implementation can be simplified by assuming a standard structure
+    # or enhanced with more complex logic if needed. For now, we'll pass.
+    return {"status": "success"} # Assume we'll search the whole text for now
 
-def agent_extract_metadata(text_chunk: str) -> dict:
-    """Agent 2: Extracts the high-level study metadata."""
+def agent_extract_metadata(full_text: str) -> dict:
+    """Agent 2: Extracts the high-level study metadata from the first few pages."""
     prompt = (
-        "You are a metadata extraction specialist. From the provided text, extract study information precisely. If absent, use null.\n"
+        "You are a metadata extraction specialist. From the beginning of this document, extract study information. If absent, use null.\n"
         'Respond in JSON: {"study_info": {"first_author_surname": "...", "publication_year": "...", "journal": "...", "study_design": "...", "study_country": "...", "patient_population": "...", "targeted_condition": "...", "diagnostic_criteria": "...", "interventions_tested": "...", "comparison_group": "..."}}\n\n'
-        f"Text to analyze:\n{text_chunk}"
+        f"Text to analyze:\n{full_text[:6000]}"
     )
     st.write("↳ Agent 2: Extracting study metadata...")
     response = ask_llm(prompt)
     return parse_json_response(response, "study_info")
 
-def agent_locate_defined_outcomes(methods_text: str) -> list:
-    """Agent 3: Finds the "planned" outcomes as defined in the Methods section."""
+def agent_locate_defined_outcomes(full_text: str) -> list:
+    """Agent 3: Finds planned outcomes from the Methods section using specific rules."""
     prompt = (
-        "You are a clinical trial protocol analyst. Extract all outcome definitions from the provided Methods section. "
-        "Capture primary/secondary outcomes, definitions, measurement instruments, and timepoints. "
-        "Return a JSON object with a list called 'defined_outcomes'.\n\n"
-        f"Methods Section Text:\n{methods_text}"
+        "You are a clinical trial protocol analyst. Your task is to extract all outcome definitions, typically found in the 'Methods' section.\n\n"
+        "**CRITICAL EXTRACTION RULES:**\n"
+        "1.  **Handle Semicolon-Separated Lists:** When a sentence lists outcomes separated by semicolons (e.g., 'Secondary outcomes were A; B; and C'), treat each item (A, B, C) as a separate outcome domain.\n"
+        "2.  **Handle Time-Based Grouping:** When outcomes are grouped by time (e.g., 'before 34 weeks'), create a separate domain for each timepoint.\n\n"
+        "**EXAMPLE:**\n"
+        "If you see: 'Secondary outcomes were adverse outcomes of pregnancy before 34 weeks of gestation; and poor fetal growth...'\n"
+        "You MUST extract these as separate domains: 'Adverse outcomes of pregnancy before 34 weeks of gestation' and 'Poor fetal growth'.\n\n"
+        "**OUTPUT FORMAT:** Return a JSON object with a list called 'defined_outcomes'.\n\n"
+        f"**Document Text to Analyze:**\n{full_text}"
     )
-    st.write("↳ Agent 3: Locating defined outcomes in Methods...")
+    st.write("↳ Agent 3: Locating defined outcomes from text...")
     response = ask_llm(prompt)
     return parse_json_response(response, "defined_outcomes") or []
 
-def agent_extract_reported_results(results_text: str) -> list:
-    """Agent 4: Extracts the "reported" outcomes from the Results and Tables."""
+
+def agent_parse_table(table_text: str) -> list:
+    """Agent 4: A specialist agent to parse the text of a single table."""
     prompt = (
-        "You are a clinical trial results analyst. Extract all reported outcomes from the provided Results section and Tables. "
-        "Structure hierarchically with domain and specific measures. "
-        "Return a JSON object with a list called 'reported_results'.\n\n"
-        f"Results and Tables Text:\n{results_text}"
+        "You are an expert at parsing clinical trial tables. Your only job is to analyze the text of the single table provided below and extract its hierarchical outcomes. DO NOT HALLUCINATE.\n\n"
+        "**CRITICAL TABLE PARSING RULES:**\n"
+        "1.  **Identify the Domain:** The main heading of a group of outcomes is the 'outcome_domain'. It often ends with '— no. (%)' or is a bolded header for a section.\n"
+        "2.  **Identify Specific Outcomes:** Items listed or indented under a domain heading are the 'outcome_specific' measures.\n"
+        "3.  **Verbatim Extraction:** Use the EXACT wording from the table.\n\n"
+        "--- TABLE PARSING EXAMPLES ---\n"
+        "**EXAMPLE 1:**\n"
+        "If the table text is:\n"
+        "'''\nDeath or complications — no. (%)\n"
+        "  Any                                32 (4.0)\n"
+        "  Miscarriage, stillbirth, or death  19 (2.4)\n'''\n"
+        "Extract as:\n"
+        "- Domain: 'Death or complications', Specific: 'Any'\n"
+        "- Domain: 'Death or complications', Specific: 'Miscarriage, stillbirth, or death'\n\n"
+        "**EXAMPLE 2:**\n"
+        "If the table text is:\n"
+        "'''\nAdverse outcomes at <34 wk of gestation\n"
+        "  Any — no. (%)                            32 (4.0)\n"
+        "  Preeclampsia — no. (%)                   3 (0.4)\n'''\n"
+        "Extract as:\n"
+        "- Domain: 'Adverse outcomes at <34 wk of gestation', Specific: 'Any'\n"
+        "- Domain: 'Adverse outcomes at <34 wk of gestation', Specific: 'Preeclampsia'\n\n"
+        "--- END OF EXAMPLES ---\n\n"
+        "**OUTPUT FORMAT:** Return a JSON object with a list called 'table_outcomes'. Each item must have 'outcome_domain' and 'outcome_specific'.\n\n"
+        f"**TABLE TEXT TO PARSE:**\n{table_text}"
     )
-    st.write("↳ Agent 4: Extracting reported results...")
+    # This agent does not need a spinner, it's part of a larger process
     response = ask_llm(prompt)
-    return parse_json_response(response, "reported_results") or []
-
-def agent_synthesize_and_verify(defined_outcomes: list, reported_results: list, full_text: str) -> list:
-    """Agent 5: Merges, deduplicates, and verifies the final list of outcomes."""
-    prompt = (
-        "You are a senior clinical data reviewer. Synthesize and verify outcomes from two lists: 1. `planned_outcomes` and 2. `reported_results`. "
-        "Create a single, complete, deduplicated list. For each planned outcome, find its result and merge the info. "
-        "If a planned outcome is missing, re-scan the `full_document_text` to find it. "
-        "Return a final JSON object with a key 'final_outcomes'. Each item must have keys: "
-        "'outcome_type', 'outcome_domain', 'outcome_specific', 'definition', 'measurement_method', 'timepoint'.\n\n"
-        f"planned_outcomes = {json.dumps(defined_outcomes)}\n\n"
-        f"reported_results = {json.dumps(reported_results)}\n\n"
-        f"full_document_text = {full_text}"
-    )
-    st.write("↳ Agent 5: Synthesizing and verifying final outcome list...")
-    response = ask_llm(prompt)
-    return parse_json_response(response, "final_outcomes") or []
+    return parse_json_response(response, "table_outcomes") or []
 
 
-# ---------- 3. FALLBACK STRATEGY ----------
-
-def run_simple_extraction(full_text: str):
-    """A simpler, single-agent fallback if the advanced pipeline fails."""
-    st.warning("Switching to simple, single-pass extraction mode.")
-    prompt = (
-        "You are an expert medical reviewer. The document could not be mapped, so analyze the entire text. "
-        "Extract study metadata and all hierarchical outcomes. "
-        "Return a single JSON object with two top-level keys: 'study_info' and 'outcomes'.\n\n"
-        "'study_info' should contain: first_author_surname, publication_year, journal, etc.\n"
-        "'outcomes' should be a list where each item has keys: outcome_type, outcome_domain, outcome_specific, definition, etc.\n\n"
-        f"Full document text:\n{full_text}"
-    )
-    response = ask_llm(prompt)
-    data = parse_json_response(response, None)
-    if not data:
-        return None, None
-    return data.get("study_info"), data.get("outcomes")
-
-
-# ---------- 4. MAIN ORCHESTRATION PIPELINE ----------
-
-def run_extraction_pipeline(file):
-    """Orchestrates the entire multi-agent extraction process with a fallback."""
-    full_text = pdf_to_text(file)
-    if not full_text:
-        return None, None
-
-    section_map = agent_map_document_sections(full_text)
-
-    if not section_map:
-        return run_simple_extraction(full_text)
-
-    st.success("✓ Proceeding with advanced multi-agent extraction.")
-
-    def get_section_text(start_key, end_key=None):
-        start_marker = section_map.get(start_key)
-        if not start_marker: return ""
-        start_index = full_text.find(start_marker)
-        if start_index == -1: return ""
-        end_index = len(full_text)
-        if end_key and section_map.get(end_key):
-            next_marker = section_map.get(end_key)
-            end_index = full_text.find(next_marker, start_index)
-            if end_index == -1: end_index = len(full_text)
-        return full_text[start_index:end_index]
-
-    abstract_text = get_section_text('abstract_start', 'methods_start')
-    methods_text = get_section_text('methods_start', 'results_start')
-    results_and_tables_text = get_section_text('results_start')
-
-    study_info = agent_extract_metadata(abstract_text + "\n\n" + methods_text)
-    defined_outcomes = agent_locate_defined_outcomes(methods_text)
-    reported_results = agent_extract_reported_results(results_and_tables_text)
-    final_outcomes = agent_synthesize_and_verify(defined_outcomes, reported_results, full_text)
-
-    return study_info, final_outcomes
-
-
-# ---------- 5. STREAMLIT UI ----------
-
-st.set_page_config(layout="wide")
-st.title("Advanced Clinical Trial Outcome Extractor")
-st.markdown("This tool uses a multi-agent AI workflow to accurately extract and verify outcomes from PDF trial reports.")
-
-file = st.file_uploader("Upload a PDF clinical trial report", type="pdf")
-
-if file:
-    with st.status(f"Processing {file.name}...", expanded=True) as status:
-        study_info, outcomes = run_extraction_pipeline(file)
-
-        if outcomes:
-            status.update(label="Processing complete!", state="complete", expanded=False)
-            df = pd.DataFrame(outcomes)
-            
-            final_rows = []
-            if not study_info: study_info = {}
-            study_info["pdf_name"] = file.name
-
-            for outcome in outcomes:
-                row = study_info.copy()
-                row.update(outcome)
-                final_rows.append(row)
-            final_df = pd.DataFrame(final_rows)
-
-            st.success(f"Successfully extracted {len(df[df['outcome_type'] == 'domain'])} domains and {len(df[df['outcome_type'] == 'specific'])} specific outcomes.")
-            st.subheader("Structured Outcome View")
-            st.dataframe(df[['outcome_type', 'outcome_domain', 'outcome_specific', 'definition', 'timepoint']], use_container_width=True, hide_index=True)
-
-            st.subheader("Export Results")
-            st.download_button(
-                "Download Extracted Data as CSV",
-                final_df.to_csv(index=False).encode('utf-8'),
-                f"extracted_outcomes_{file.name}.csv",
-                "text/csv",
-                key='download-csv'
-            )
-            
-            st.subheader("Full Data Table")
-            st.dataframe(final_df)
-            
-            st.subheader("Extracted Study Information")
-            st.json(study_info)
-
-        else:
-            status.update(label="Extraction Failed", state="error", expanded=True)
-            st.error("Could not extract any outcomes even with the fallback method. The document is likely unreadable.")
+def agent_synthesize_and_verify(defined_outcomes: list, table_outcomes: list) -> list:
+    """Agent 5: Merges all outcomes into a final
