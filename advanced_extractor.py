@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v2 - with fallback logic) --------
+# -------- advanced_extractor.py (v2.1 - final fix) --------
 
 import os
 import json
@@ -182,7 +182,6 @@ def run_extraction_pipeline(file):
     st.success("✓ Proceeding with advanced multi-agent extraction.")
 
     def get_section_text(start_key, end_key=None):
-        # ... (Helper function to get text for a section)
         start_marker = section_map.get(start_key)
         if not start_marker: return ""
         start_index = full_text.find(start_marker)
@@ -220,9 +219,8 @@ if file:
 
         if outcomes:
             status.update(label="Processing complete!", state="complete", expanded=False)
-            df = pd.DataFrame(outcomes) # Convert just the outcomes to a DataFrame
+            df = pd.DataFrame(outcomes)
             
-            # Add study_info to each row for the final CSV
             final_rows = []
             if not study_info: study_info = {}
             study_info["pdf_name"] = file.name
@@ -234,14 +232,13 @@ if file:
             final_df = pd.DataFrame(final_rows)
 
             st.success(f"Successfully extracted {len(df[df['outcome_type'] == 'domain'])} domains and {len(df[df['outcome_type'] == 'specific'])} specific outcomes.")
-            # ... (Rest of the UI for displaying tables and downloading, which can remain largely the same)
             st.subheader("Structured Outcome View")
             st.dataframe(df[['outcome_type', 'outcome_domain', 'outcome_specific', 'definition', 'timepoint']], use_container_width=True, hide_index=True)
 
             st.subheader("Export Results")
             st.download_button(
                 "Download Extracted Data as CSV",
-                final__df.to_csv(index=False).encode('utf-8'),
+                final_df.to_csv(index=False).encode('utf-8'),
                 f"extracted_outcomes_{file.name}.csv",
                 "text/csv",
                 key='download-csv'
