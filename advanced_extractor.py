@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# -------- enhanced_study_extractor.py (v12.0 - comprehensive study metadata + outcomes) --------
+
+# -------- enhanced_clinical_trial_extractor.py (v12.0 - comprehensive with timepoints & definitions) --------
 
 import os
 import json
@@ -106,9 +107,9 @@ Respond in this exact JSON format:
 
     return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "study_metadata")
 
-def agent_locate_defined_outcomes(full_text: str) -> list:
-    """Agent 2: Finds planned outcomes from the Methods section with definitions and timepoints."""
-    prompt = f'''You are a clinical trial protocol analyst. Extract all outcome definitions from this document, typically found in the 'Methods', 'Outcome Measures', or 'Endpoints' sections.
+def agent_locate_defined_outcomes_with_details(full_text: str) -> list:
+    """Agent 2: Finds planned outcomes with comprehensive definitions and timepoints."""
+    prompt = f'''You are a clinical trial protocol analyst. Extract all outcome definitions from this document with COMPLETE details including definitions and timepoints.
 
 **CRITICAL EXTRACTION RULES:**
 1. **Extract Complete Definitions:** Capture HOW each outcome is defined/measured
@@ -143,8 +144,8 @@ def agent_locate_defined_outcomes(full_text: str) -> list:
 
     return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "defined_outcomes") or []
 
-def agent_parse_table_enhanced(table_text: str) -> list:
-    """Agent 3: Enhanced table parser that captures hierarchical structure, complete names, and timepoints."""
+def agent_parse_table_enhanced_with_details(table_text: str) -> list:
+    """Agent 3: Enhanced table parser that captures hierarchical structure, complete names, definitions and timepoints."""
     prompt = f'''You are an expert at parsing clinical trial tables with PERFECT extraction of hierarchical structure, definitions, and timepoints.
 
 **STEP 1: CLASSIFY THE TABLE**
@@ -193,10 +194,6 @@ First, determine if this table describes **baseline patient characteristics** (d
    - domain="Adverse outcomes", specific="Gestational hypertension", timepoint="<37 wk of gestation"  
    - domain="Adverse outcomes", specific="Small-for-gestational-age status without preeclampsia", timepoint="<37 wk of gestation"
 
-6. **CAPTURE MEASUREMENT METHODS:**
-   - Look for references to scales, questionnaires, lab tests
-   - Note any footnotes explaining measurement criteria
-
 **OUTPUT FORMAT:** Return JSON with 'table_outcomes' list:
 {{
   "outcome_domain": "Exact main section header (timepoint extracted if applicable)",
@@ -211,7 +208,7 @@ First, determine if this table describes **baseline patient characteristics** (d
 
     return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "table_outcomes") or []
 
-def agent_finalize_and_structure_enhanced(messy_list: list) -> list:
+def agent_finalize_comprehensive_structure(messy_list: list) -> list:
     """Agent 4: Enhanced structuring that preserves hierarchical structure, complete names, definitions and timepoints."""
     prompt = f'''You are a data structuring expert. Clean, deduplicate, and structure this messy list of outcomes while PRESERVING hierarchical structure, complete outcome names, definitions, and timepoints.
 
@@ -234,8 +231,8 @@ def agent_finalize_and_structure_enhanced(messy_list: list) -> list:
    - Standardize similar timepoints: "before 37 weeks", "<37 wk", "prior to 37 weeks" → "before 37 weeks"
 
 4. **OUTCOME STRUCTURE:**
-   - For each unique outcome domain, create one entry with `"outcome_type": "domain"`
-   - For each specific outcome under a domain, create an entry with `"outcome_type": "specific"`
+   - For each unique outcome domain, create one entry with "outcome_type": "domain"
+   - For each specific outcome under a domain, create an entry with "outcome_type": "specific"
    - Inherit domain timepoints to specific outcomes if they don't have their own
 
 5. **DEFINITION ENHANCEMENT:**
@@ -272,15 +269,15 @@ def run_comprehensive_extraction_pipeline(full_text: str):
     # Extract comprehensive study metadata
     study_metadata = agent_extract_comprehensive_study_metadata(full_text)
     
-    # Extract defined outcomes
-    defined_outcomes = agent_locate_defined_outcomes(full_text)
+    # Extract defined outcomes with details
+    defined_outcomes = agent_locate_defined_outcomes_with_details(full_text)
     
     # Extract and parse all tables
     table_texts = re.findall(r"(Table \d+\..*?)(?=\nTable \d+\.|\Z)", full_text, re.DOTALL)
     all_table_outcomes = []
     if table_texts:
         for table_text in table_texts:
-            parsed_outcomes = agent_parse_table_enhanced(table_text)
+            parsed_outcomes = agent_parse_table_enhanced_with_details(table_text)
             if parsed_outcomes:
                 all_table_outcomes.extend(parsed_outcomes)
     
@@ -290,7 +287,7 @@ def run_comprehensive_extraction_pipeline(full_text: str):
         return study_metadata, []
 
     # Final structuring
-    final_outcomes = agent_finalize_and_structure_enhanced(raw_combined_list)
+    final_outcomes = agent_finalize_comprehensive_structure(raw_combined_list)
     return study_metadata, final_outcomes
 
 # ---------- 4. ENHANCED STREAMLIT UI ----------
@@ -300,7 +297,8 @@ st.title("Enhanced Clinical Trial Data Extractor (v12.0)")
 st.markdown("""
 **✨ ENHANCED FEATURES:**
 - **Comprehensive Study Metadata:** Extracts last author+year, title, journal, healthcare setting, country, etc.
-- **Hierarchical Outcomes:** Preserves exact domain-specific structure (e.g., adverse events → specific events)
+- **Detailed Outcomes:** Captures definitions, measurement methods, and timepoints for all outcomes
+- **Hierarchical Structure:** Preserves exact domain-specific structure (e.g., adverse events → specific events)
 - **Complete Names:** Maintains full outcome descriptions including qualifiers
 - **Publication Ready:** Clean export format for systematic reviews
 """)
@@ -334,22 +332,37 @@ if uploaded_file is not None:
                     st.write(f"**Intervention:** {study_metadata.get('intervention_tested', 'Not found')}")
                     st.write(f"**Comparator:** {study_metadata.get('comparator', 'Not found')}")
             
-            # Display outcomes with hierarchical structure
-            st.subheader("🎯 Extracted Outcomes")
+            # Display outcomes with hierarchical structure and details
+            st.subheader("🎯 Extracted Outcomes with Details")
             df = pd.DataFrame(outcomes)
-            for col in ['outcome_domain', 'outcome_specific', 'outcome_type', 'definition', 'timepoint']:
+            for col in ['outcome_domain', 'outcome_specific', 'outcome_type', 'definition', 'measurement_method', 'timepoint']:
                 if col not in df.columns: 
                     df[col] = ''
             df.fillna('', inplace=True)
 
-            # HIERARCHICAL DISPLAY IN-APP
+            # HIERARCHICAL DISPLAY WITH DETAILS
             domains = df[df['outcome_domain'] != '']['outcome_domain'].unique()
             for domain in domains:
                 st.markdown(f"**DOMAIN:** {domain}")
-                specific_outcomes = df[(df['outcome_domain'] == domain) & (df['outcome_specific'] != '') & (df['outcome_specific'] != domain)]['outcome_specific'].unique()
+                
+                # Show domain-level details if available
+                domain_row = df[df['outcome_domain'] == domain].iloc[0]
+                if domain_row.get('definition'):
+                    st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;*Definition:* {domain_row['definition']}")
+                if domain_row.get('timepoint'):
+                    st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;*Timepoint:* {domain_row['timepoint']}")
+                
+                # Show specific outcomes
+                specific_outcomes = df[(df['outcome_domain'] == domain) & (df['outcome_specific'] != '') & (df['outcome_specific'] != domain)]
                 if len(specific_outcomes) > 0:
-                    for specific in specific_outcomes:
-                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• {specific}")
+                    for _, outcome in specific_outcomes.iterrows():
+                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• **{outcome['outcome_specific']}**")
+                        if outcome.get('definition'):
+                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*Definition:* {outcome['definition']}")
+                        if outcome.get('measurement_method'):
+                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*Method:* {outcome['measurement_method']}")
+                        if outcome.get('timepoint'):
+                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*Timepoint:* {outcome['timepoint']}")
                 else:
                     st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• *This is a primary outcome or a domain with no specific sub-outcomes listed.*")
                 st.write("") 
@@ -433,7 +446,7 @@ if uploaded_file is not None:
                 data=export_df.to_csv(index=False).encode('utf-8'),
                 file_name=f"Complete_Study_Data_{uploaded_file.name.replace('.pdf', '')}.csv",
                 mime='text/csv',
-                help="Complete dataset: Study metadata at top, then hierarchical outcomes"
+                help="Complete dataset: Study metadata + all outcomes with definitions, methods & timepoints"
             )
             
             # Show preview
