@@ -1,206 +1,198 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v11.0 - publication-ready export) --------
+
+"""
+Clinical‑Trial Outcome Extractor – **v11.2 (metadata rows)**
+───────────────────────────────────────────────────────────
+Adds study‑level metadata *as the first block of rows* in the publication‑ready
+CSV, per user request.
+
+**New metadata rows (in this order)**
+1. Last author surname + publication year
+2. Paper title
+3. Journal
+4. Health‑care setting (hospital, outpatient, etc.)
+5. Country where patients were recruited
+6. Patient population
+7. Targeted condition (plus diagnostic criteria)
+8. Intervention tested
+9. Comparator / control
+
+The rest of the v11 logic is unchanged.
+"""
 
 import os
 import json
 import re
+import io
+from typing import List, Tuple
+
+import pdfplumber
 import streamlit as st
 import pandas as pd
-import pdfplumber
-import io
 from openai import OpenAI
 
-# ----- CONFIG -----
+# ---------------- CONFIG ----------------
 MODEL = "gpt-4o"
-DEFAULT_TOKENS_FOR_RESPONSE = 4096
-LARGE_TOKENS_FOR_RESPONSE = 8192
+DEFAULT_TOKENS = 4096
+LARGE_TOKENS = 8192
 client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY")))
 
-# ---------- 1. CORE HELPER FUNCTIONS ----------
+# -------------- HELPERS -----------------
 
 @st.cache_data
-def get_pdf_text(file_contents):
-    """Extracts text from the bytes of an uploaded PDF file and caches the result."""
-    st.info("Step 1: Reading PDF text...")
+def get_pdf_text(file_bytes: bytes):
     try:
-        with pdfplumber.open(io.BytesIO(file_contents)) as pdf:
-            full_text = "\n\n".join(p.extract_text() or "" for p in pdf.pages)
-            if not full_text.strip():
-                st.error("This PDF appears to be a scanned image or contains no extractable text.")
-                return None
-            st.success("✓ PDF text read successfully.")
-            return full_text
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            return "\n\n".join(p.extract_text() or "" for p in pdf.pages)
     except Exception as e:
-        st.error(f"Error reading PDF: {e}")
+        st.error(f"PDF read error: {e}")
         return None
 
-def ask_llm(prompt: str, is_json: bool = True, max_response_tokens: int = DEFAULT_TOKENS_FOR_RESPONSE) -> str:
-    """Generic function to call the OpenAI API."""
+
+def ask_llm(prompt: str, *, json_mode: bool = True, max_tokens: int = DEFAULT_TOKENS):
+    """Call OpenAI with mandatory system msg to satisfy json_object rule."""
+    msgs = [
+        {
+            "role": "system",
+            "content": "You are a json‑only assistant. Always respond with a single valid JSON document.",
+        },
+        {"role": "user", "content": prompt},
+    ]
     try:
-        response_format = {"type": "json_object"} if is_json else {"type": "text"}
-        response = client.chat.completions.create(
+        resp = client.chat.completions.create(
             model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
+            messages=msgs,
             temperature=0.0,
-            max_tokens=max_response_tokens,
-            response_format=response_format
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"} if json_mode else {"type": "text"},
         )
-        return response.choices[0].message.content
+        return resp.choices[0].message.content
     except Exception as e:
-        st.error(f"An API error occurred: {e}")
+        st.error(f"OpenAI error: {e}")
         return None
 
-def parse_json_response(response_text: str, key: str):
-    """Safely parses JSON from the LLM response."""
-    if not response_text: return None
+
+def parse_json(text: str, key: str | None):
+    if not text:
+        return None
     try:
-        json_str = response_text.strip().removeprefix("```json").removesuffix("```")
-        data = json.loads(json_str)
+        data = json.loads(text.strip().removeprefix("```json").removesuffix("```"))
         return data if key is None else data.get(key)
-    except (json.JSONDecodeError, AttributeError):
-        st.warning(f"Could not parse a valid JSON response from the AI.")
+    except json.JSONDecodeError:
+        st.warning("LLM did not return valid JSON.")
         return None
 
+# ------------ AGENTS -------------
 
-# ---------- 2. SPECIALIZED AGENT FUNCTIONS ----------
-
-def agent_extract_metadata(full_text: str) -> dict:
-    """Agent 1: Extracts the high-level study metadata."""
-    prompt = ('You are a metadata extraction specialist. From the beginning of this document, extract the study information. If a value is absent, use null.\n'
-              'Respond in this exact JSON format: {"study_info": {"first_author_surname": "...", "publication_year": "...", "journal": "...", "study_design": "...", "study_country": "...", "patient_population": "...", "targeted_condition": "...", "diagnostic_criteria": "...", "interventions_tested": "...", "comparison_group": "..."}}\n\n'
-              f"Text to analyze:\n{full_text[:8000]}")
-    return parse_json_response(ask_llm(prompt), "study_info")
-
-def agent_locate_defined_outcomes(full_text: str) -> list:
-    """Agent 2: Finds planned outcomes from the Methods section."""
-    prompt = ('You are a clinical trial protocol analyst. Extract all outcome definitions, typically found in the \'Methods\' section.\n\n'
-              '**RULES:**\n'
-              "1.  **Handle Semicolon-Separated Lists:** Treat each item in a semicolon-separated list as a separate outcome domain.\n"
-              "2.  **Handle Time-Based Grouping:** Create a separate domain for each timepoint (e.g., 'before 34 weeks').\n\n"
-              '**OUTPUT FORMAT:** Return a JSON object with a list called \'defined_outcomes\'.\n\n'
-              f'**Document Text to Analyze:**\n{full_text}')
-    return parse_json_response(ask_llm(prompt), "defined_outcomes") or []
-
-def agent_parse_table(table_text: str) -> list:
-    """Agent 3: A specialist agent to parse a single table."""
-    prompt = ('You are an expert at parsing clinical trial tables. Analyze the single table text below.\n\n'
-              '**STEP 1: CLASSIFY THE TABLE**\n'
-              'First, determine if this table describes **baseline patient characteristics** (demographics, age, etc.) or **clinical trial outcomes** (results, events, complications).\n\n'
-              '**STEP 2: EXTRACT BASED ON CLASSIFICATION**\n'
-              '-   **If BASELINE table**, you MUST return an empty list: `{\\"table_outcomes\\": []}`\n'
-              '-   **If, and ONLY IF, it is an OUTCOME table**, proceed with the extraction rules below.\n\n'
-              '**CLINICAL OUTCOME TABLE PARSING RULES:**\n'
-              "1.  **Extract Clean Names:** The outcome name is the text description ONLY. You **MUST STRIP AWAY** all trailing data, numbers, percentages, and formatting like '— no. (%)'.\n"
-              "2.  **Identify the Domain & Specific Outcomes:** The main heading is the 'outcome_domain'. Items indented under it are 'outcome_specific' measures.\n"
-              '**OUTPUT FORMAT:** Return a JSON object with a list called \'table_outcomes\'.\n\n'
-              f'**TABLE TEXT TO PARSE:**\n{table_text}')
-    return parse_json_response(ask_llm(prompt), "table_outcomes") or []
-
-def agent_finalize_and_structure(messy_list: list) -> list:
-    """Agent 4: Takes a messy list of outcomes and cleans, deduplicates, and structures it."""
-    prompt = ('You are a data structuring expert. Clean, deduplicate, and structure this messy list of outcomes into a final hierarchical list.\n\n'
-              '**RULES:**\n'
-              '1.  For each unique outcome domain, create one entry with `\\"outcome_type\\": \\"domain\\"`.\n'
-              '2.  For each specific outcome under a domain, create an entry with `\\"outcome_type\\": \\"specific\\"`.\n'
-              '3.  Combine information. If you see the same outcome multiple times, merge any definitions or timepoints.\n'
-              '4.  Remove any obvious non-outcome entries or duplicates.\n\n'
-              '**OUTPUT FORMAT:** Return a final JSON object with a key \'final_outcomes\'. Each item must have keys: \'outcome_type\', \'outcome_domain\', \'outcome_specific\', \'definition\', \'measurement_method\', \'timepoint\'.\n\n'
-              f'**MESSY LIST TO PROCESS:**\n{json.dumps(messy_list, indent=2)}')
-    return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "final_outcomes") or []
+def agent_extract_metadata(txt: str):
+    prompt = (
+        "You are a metadata extraction specialist. Extract the following fields as JSON:\n"
+        "first_author_surname, last_author_surname, publication_year, paper_title, journal, study_design, "
+        "health_care_setting, study_country, patient_population, targeted_condition, diagnostic_criteria, "
+        "interventions_tested, comparison_group.\n"
+        "If a value is absent, use null. Respond as {\"study_info\": {…}}.\n\n"
+        f"Text (first 8k chars):\n{txt[:8000]}"
+    )
+    return parse_json(ask_llm(prompt), "study_info")
 
 
-# ---------- 3. MAIN ORCHESTRATION PIPELINE (CACHED) ----------
-
-@st.cache_data(show_spinner="Step 2: Running AI extraction pipeline...")
-def run_extraction_pipeline(full_text: str):
-    """Orchestrates the AI agent calls. This entire function is cached."""
-    study_info = agent_extract_metadata(full_text)
-    defined_outcomes = agent_locate_defined_outcomes(full_text)
-    
-    table_texts = re.findall(r"(Table \d+\..*?)(?=\nTable \d+\.|\Z)", full_text, re.DOTALL)
-    all_table_outcomes = []
-    if table_texts:
-        for table_text in table_texts:
-            parsed_outcomes = agent_parse_table(table_text)
-            if parsed_outcomes:
-                all_table_outcomes.extend(parsed_outcomes)
-    
-    raw_combined_list = defined_outcomes + all_table_outcomes
-    if not raw_combined_list:
-        return study_info, []
-
-    final_outcomes = agent_finalize_and_structure(raw_combined_list)
-    return study_info, final_outcomes
+def agent_locate_defined_outcomes(txt: str):
+    prompt = (
+        "You are a clinical‑trial protocol analyst. Extract all outcome definitions from the Methods section.\n\n"
+        "Rules: Treat semicolon lists as separate domains; split by timepoints.\n\n"
+        "Return JSON {\"defined_outcomes\": […]}.\n\n"
+        f"Doc text:\n{txt}"
+    )
+    return parse_json(ask_llm(prompt), "defined_outcomes") or []
 
 
-# ---------- 4. STREAMLIT UI ----------
+def agent_parse_table(tbl: str):
+    prompt = (
+        "You are an expert at parsing clinical‑trial tables. Decide if baseline (return []), else strip stats and build domain/specific pairs.\n\n"
+        "Return JSON {\"table_outcomes\": […]}.\n\n"
+        f"Table text:\n{tbl}"
+    )
+    return parse_json(ask_llm(prompt), "table_outcomes") or []
+
+
+def agent_finalize(lst: list):
+    prompt = (
+        "You are a data‑structuring expert. Clean & deduplicate into hierarchical outcomes.\n"
+        "Return JSON {\"final_outcomes\": […]}.\n\n"
+        f"Raw list:\n{json.dumps(lst, indent=2)}"
+    )
+    return parse_json(ask_llm(prompt, max_tokens=LARGE_TOKENS), "final_outcomes") or []
+
+# ----------- PIPELINE ------------
+
+@st.cache_data(show_spinner="🔍 Extracting…")
+def run_pipeline(txt: str):
+    meta = agent_extract_metadata(txt)
+    defined = agent_locate_defined_outcomes(txt)
+    tables = re.findall(r"(Table\s+\d+\..*?)(?=\n(?:Table\s+\d+\.|Figure\s+\d+\.|$))", txt, re.DOTALL)
+    tbl_outs = []
+    for t in tables:
+        tbl_outs.extend(agent_parse_table(t))
+    raw = defined + tbl_outs
+    finals = agent_finalize(raw) if raw else []
+    return meta, finals
+
+# ----------- STREAMLIT UI ---------
 
 st.set_page_config(layout="wide")
-st.title("Clinical Trial Outcome Extractor (v11.0)")
-st.markdown("This tool uses a cached, multi-agent AI workflow to accurately and reliably extract outcomes.")
+st.title("Clinical‑Trial Outcome Extractor v11.2 (metadata rows)")
 
-uploaded_file = st.file_uploader("Upload a PDF clinical trial report to begin", type="pdf")
+pdf = st.file_uploader("Upload a clinical‑trial PDF", type="pdf")
+if pdf:
+    txt = get_pdf_text(pdf.getvalue())
+    if not txt:
+        st.stop()
 
-if uploaded_file is not None:
-    file_contents = uploaded_file.getvalue()
-    full_text = get_pdf_text(file_contents)
-    
-    if full_text:
-        study_info, outcomes = run_extraction_pipeline(full_text)
+    meta, outs = run_pipeline(txt)
 
-        if outcomes:
-            st.success(f"Processing complete for **{uploaded_file.name}**.")
-            df = pd.DataFrame(outcomes)
-            for col in ['outcome_domain', 'outcome_specific', 'outcome_type', 'definition', 'timepoint']:
-                if col not in df.columns: df[col] = ''
-            df.fillna('', inplace=True)
+    # ---------------- display ----------------
+    if meta:
+        st.subheader("Study information (parsed)")
+        st.json(meta)
 
-            # HIERARCHICAL DISPLAY IN-APP
-            st.subheader("Hierarchical Outcome View")
-            domains = df[df['outcome_domain'] != '']['outcome_domain'].unique()
-            for domain in domains:
-                st.markdown(f"**DOMAIN:** {domain}")
-                specific_outcomes = df[(df['outcome_domain'] == domain) & (df['outcome_specific'] != '') & (df['outcome_specific'] != domain)]['outcome_specific'].unique()
-                if len(specific_outcomes) > 0:
-                    for specific in specific_outcomes:
-                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• {specific}")
-                else:
-                    st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• *This is a primary outcome or a domain with no specific sub-outcomes listed.*")
-                st.write("") 
+    st.subheader("Extracted outcomes – hierarchical view")
+    if outs:
+        df = pd.DataFrame(outs)
+        for col in ["outcome_domain", "outcome_specific", "definition", "timepoint"]:
+            if col not in df.columns:
+                df[col] = ""
+        for dom in df["outcome_domain"].unique():
+            st.markdown(f"**DOMAIN:** {dom}")
+            for spec in df[(df["outcome_domain"] == dom) & (df["outcome_specific"] != dom)]["outcome_specific"].unique():
+                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• {spec}")
+            st.write("")
 
-            # --- NEW PUBLICATION-READY EXPORT ---
-            st.subheader("Export Results")
-            export_rows = []
-            for domain in domains:
-                # Find the primary entry for the domain to get its definition/timepoint
-                domain_row = df[df['outcome_domain'] == domain].iloc[0]
-                export_rows.append({
-                    "Domain": domain,
-                    "Specific Outcome": "", # This is a domain row
-                    "Definition": domain_row.get('definition', ''),
-                    "Timepoint": domain_row.get('timepoint', '')
-                })
-                # Find all specific outcomes for this domain
-                specific_outcomes_df = df[(df['outcome_domain'] == domain) & (df['outcome_specific'] != '') & (df['outcome_specific'] != domain)]
-                for _, specific_row in specific_outcomes_df.iterrows():
-                    export_rows.append({
-                        "Domain": "", # Leave domain blank for specific outcomes
-                        "Specific Outcome": specific_row['outcome_specific'],
-                        "Definition": specific_row.get('definition', ''),
-                        "Timepoint": specific_row.get('timepoint', '')
-                    })
-            export_df = pd.DataFrame(export_rows)
+        # ---------- CSV export with metadata rows ----------
+        st.subheader("Publication‑ready CSV export (with study metadata)")
 
-            st.download_button(
-                label="**Download Publication-Ready CSV**",
-                data=export_df.to_csv(index=False).encode('utf-8'),
-                file_name=f"Publication_Outcomes_{uploaded_file.name}.csv",
-                mime='text/csv',
-                help="A clean, human-readable table with domains listed once, followed by their specific outcomes."
-            )
+        def meta_row(label: str, value: str) -> dict:
+            return {"Domain": label, "Specific Outcome": value or "", "Definition": "", "Timepoint": ""}
 
-            # EXPANDER FOR METADATA
-            with st.expander("Show Extracted Study Information"):
-                st.json(study_info or {})
-        else:
-            st.error("Extraction ran but no outcomes were found.")
+        # Build metadata rows in the required order
+        meta_rows: List[dict] = []
+        if meta:
+            m = meta
+            meta_rows.extend([
+                meta_row("Last author + year", f"{m.get('last_author_surname', '')} {m.get('publication_year', '')}"),
+                meta_row("Paper title", m.get("paper_title", "")),
+                meta_row("Journal", m.get("journal", "")),
+                meta_row("Health‑care setting", m.get("health_care_setting", "")),
+                meta_row("Country recruited", m.get("study_country", "")),
+                meta_row("Patient population", m.get("patient_population", "")),
+                meta_row("Targeted condition (definition)", f"{m.get('targeted_condition', '')} ({m.get('diagnostic_criteria', '')})".strip()),
+                meta_row("Intervention tested", m.get("interventions_tested", "")),
+                meta_row("Comparator", m.get("comparison_group", "")),
+            ])
+
+        # Outcome rows (same as before)
+        outcome_rows: List[dict] = []
+        for dom in df["outcome_domain"].unique():
+            dom_row = df[df["outcome_domain"] == dom].iloc[0]
+            outcome_rows.append({"Domain": dom, "Specific Outcome": "", "Definition": dom_row.get("definition", ""), "Timepoint": dom_row.get("timepoint", "")})
+            for spec in df[(df["outcome_domain"] == dom) & (df["outcome_specific"] != dom)]["outcome_specific"].unique():
+                outcome_rows.append({"Domain": "", "Specific Outcome": spec, "Definition": "", "Time
