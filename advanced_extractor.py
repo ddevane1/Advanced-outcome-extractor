@@ -67,7 +67,7 @@ def ask_llm(prompt: str, *, json_mode: bool = True, max_tokens: int = DEFAULT_TO
         return None
 
 
-def parse_json(text: str | None, key: str | None):(text: str | None, key: str | None):
+def parse_json(text: str | None, key: str | None):
     if not text:
         return None
     try:
