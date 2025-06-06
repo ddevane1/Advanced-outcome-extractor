@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 
 """
-Universal Clinical‑Trial Data Extractor – **v12.7**
+Universal Clinical‑Trial Data Extractor – **v12.8**
 ──────────────────────────────────────────────────
-Crash‑proofing release.
+Recovered‑rows release – brings back outcomes that were silently dropped in
+12.7 by overly strict dedup and row‑tag logic.
 
-### Fixes
-1. **`clean_label()` accepts lists / dicts** – The LLM occasionally returns a
-   list (e.g. `["A", "B"]`) instead of a plain string.  We now coerce any
-   non‑string into readable text **before** applying regexes, preventing the
-   `TypeError: expected string or bytes‑like object` crash.
-2. **Guaranteed DataFrame columns** – after converting `outs` to `df`, we add
-   placeholder columns (`"outcome_domain"`, `"outcome_specific"`) if missing so
-   `.groupby()` never raises a `KeyError`.
-3. **Early‑exit safety** – if `df` ends up empty, we skip the grouping block and
-   show a friendly info message instead.
+### What’s fixed
+1. **Row tagging now respects digits inside parentheses**  
+   Lines such as “Grade 3–4 neutropenia (≥7 days) — no. (%)” are once again
+   tagged as ⟨ROW⟩ even though the *first* digit appears inside parentheses.
+2. **Dedup only when *exact* duplicate**  
+   We no longer discard a row just because its specific starts with the same
+   words as the domain; we drop it only when the cleaned strings are identical.
 
 No other behaviour changes.
 """
@@ -82,7 +80,6 @@ def parse_json(text: str, key: str | None = None):
 # ---------- 2. UTILS ----------
 
 def to_plain(val):
-    """Coerce lists / dicts / None into a printable string."""
     if val is None:
         return ""
     if isinstance(val, str):
@@ -146,16 +143,18 @@ def find_tables(txt: str):
 
 
 def tag_lines(table: str):
-    out = []
+    rows = []
     for raw in table.splitlines():
         line = raw.strip()
         if not line:
             continue
-        if re.search(r"\s\d", line):
-            out.append("⟨ROW⟩ " + re.split(r"\s\d", line, 1)[0].strip("–—- "))
+        # A row if we see *either* a whitespace‑digit OR an "(digit" pattern.
+        if re.search(r"\s\d|\(\d", line):
+            text = re.split(r"\s\d|\(\d", line, 1)[0].strip("–—- ")
+            rows.append("⟨ROW⟩ " + text)
         else:
-            out.append("⟨DOMAIN⟩ " + re.sub(r"\s*[–—-].*$", "", line).strip())
-    return "\n".join(out)
+            rows.append("⟨DOMAIN⟩ " + re.sub(r"\s*[–—-].*$", "", line).strip())
+    return "\n".join(rows)
 
 # ---------- 5. ORCHESTRATOR ----------
 
@@ -166,8 +165,18 @@ def run_pipeline(txt: str):
     tables = []
     for raw in find_tables(txt):
         tables.extend(agent_parse_table(tag_lines(raw)))
-    finals_raw = narrative + tables
-    finals = agent_finalize(finals_raw) if finals_raw else []
+    raw_all = narrative + tables
+
+    # Remove exact duplicates where domain == specific after basic cleaning
+    uniques = []
+    for obj in raw_all:
+        dom = to_plain(obj.get("outcome_domain", "")).strip()
+        spec = to_plain(obj.get("outcome_specific", "")).strip()
+        if dom.lower() == spec.lower():
+            continue  # skip exact duplicate rows
+        uniques.append(obj)
+
+    finals = agent_finalize(uniques) if uniques else []
 
     for obj in finals:
         domain = clean_label(obj.get("outcome_domain"))
@@ -181,7 +190,7 @@ def run_pipeline(txt: str):
 # ---------- 6. STREAMLIT UI ----------
 
 st.set_page_config(layout="wide")
-st.title("Universal Clinical‑Trial Extractor v12.7 (stable)")
+st.title("Universal Clinical‑Trial Extractor v12.8 (rows restored)")
 
 pdf = st.file_uploader("Upload a clinical‑trial PDF", type="pdf")
 if pdf:
@@ -199,7 +208,6 @@ if pdf:
     st.subheader("Extracted outcomes")
     if outs:
         df = pd.DataFrame(outs)
-        # Ensure essential columns
         for col in ("outcome_domain", "outcome_specific"):
             if col not in df.columns:
                 df[col] = "Unlabelled"
