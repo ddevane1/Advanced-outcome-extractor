@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v4.0 - dedicated table parser) --------
+# -------- advanced_extractor.py (v4.1 - final syntax verified) --------
 
 import os
 import json
@@ -62,26 +62,19 @@ def parse_json_response(response_text: str, key: str):
 
 # ---------- 2. SPECIALIZED AGENT FUNCTIONS ----------
 
-def agent_map_document_sections(full_text: str) -> dict:
-    """Agent 1: Scans the text to identify key sections."""
-    st.write("↳ Agent 1: Mapping document structure...")
-    # This agent's implementation can be simplified by assuming a standard structure
-    # or enhanced with more complex logic if needed. For now, we'll pass.
-    return {"status": "success"} # Assume we'll search the whole text for now
-
 def agent_extract_metadata(full_text: str) -> dict:
-    """Agent 2: Extracts the high-level study metadata from the first few pages."""
+    """Agent 1: Extracts the high-level study metadata from the first few pages."""
     prompt = (
         "You are a metadata extraction specialist. From the beginning of this document, extract study information. If absent, use null.\n"
         'Respond in JSON: {"study_info": {"first_author_surname": "...", "publication_year": "...", "journal": "...", "study_design": "...", "study_country": "...", "patient_population": "...", "targeted_condition": "...", "diagnostic_criteria": "...", "interventions_tested": "...", "comparison_group": "..."}}\n\n'
         f"Text to analyze:\n{full_text[:6000]}"
     )
-    st.write("↳ Agent 2: Extracting study metadata...")
+    st.write("↳ Agent 1: Extracting study metadata...")
     response = ask_llm(prompt)
     return parse_json_response(response, "study_info")
 
 def agent_locate_defined_outcomes(full_text: str) -> list:
-    """Agent 3: Finds planned outcomes from the Methods section using specific rules."""
+    """Agent 2: Finds planned outcomes from the Methods section using specific rules."""
     prompt = (
         "You are a clinical trial protocol analyst. Your task is to extract all outcome definitions, typically found in the 'Methods' section.\n\n"
         "**CRITICAL EXTRACTION RULES:**\n"
@@ -93,13 +86,13 @@ def agent_locate_defined_outcomes(full_text: str) -> list:
         "**OUTPUT FORMAT:** Return a JSON object with a list called 'defined_outcomes'.\n\n"
         f"**Document Text to Analyze:**\n{full_text}"
     )
-    st.write("↳ Agent 3: Locating defined outcomes from text...")
+    st.write("↳ Agent 2: Locating defined outcomes from text...")
     response = ask_llm(prompt)
     return parse_json_response(response, "defined_outcomes") or []
 
 
 def agent_parse_table(table_text: str) -> list:
-    """Agent 4: A specialist agent to parse the text of a single table."""
+    """Agent 3: A specialist agent to parse the text of a single table."""
     prompt = (
         "You are an expert at parsing clinical trial tables. Your only job is to analyze the text of the single table provided below and extract its hierarchical outcomes. DO NOT HALLUCINATE.\n\n"
         "**CRITICAL TABLE PARSING RULES:**\n"
@@ -133,4 +126,103 @@ def agent_parse_table(table_text: str) -> list:
 
 
 def agent_synthesize_and_verify(defined_outcomes: list, table_outcomes: list) -> list:
-    """Agent 5: Merges all outcomes into a final
+    """Agent 4: Merges all outcomes into a final, complete list."""
+    prompt = (
+        "You are a senior clinical data reviewer. Your goal is to create one final, complete, and deduplicated list of outcomes from the sources provided.\n"
+        "1. `defined_outcomes`: Outcomes defined in the text.\n"
+        "2. `table_outcomes`: Outcomes parsed from tables.\n\n"
+        "Combine these lists. The `table_outcomes` list is often the most detailed and structured, so prioritize its hierarchy. "
+        "Match the definitions from `defined_outcomes` to the corresponding items from `table_outcomes`.\n\n"
+        "Return a final JSON object with a key 'final_outcomes'. Each item must have keys: "
+        "'outcome_type', 'outcome_domain', 'outcome_specific', 'definition', 'measurement_method', 'timepoint'.\n"
+        "Create 'domain' type entries for each unique domain, and 'specific' type entries for each specific outcome.\n\n"
+        f"defined_outcomes = {json.dumps(defined_outcomes)}\n\n"
+        f"table_outcomes = {json.dumps(table_outcomes)}"
+    )
+    st.write("↳ Final Agent: Synthesizing all outcomes...")
+    response = ask_llm(prompt)
+    return parse_json_response(response, "final_outcomes") or []
+
+
+# ---------- 3. MAIN ORCHESTRATION PIPELINE ----------
+
+def run_extraction_pipeline(file):
+    """Orchestrates the entire multi-agent extraction process."""
+    full_text = pdf_to_text(file)
+    if not full_text:
+        return None, None
+
+    # Agent 1: Extract Metadata
+    study_info = agent_extract_metadata(full_text)
+
+    # Agent 2: Locate defined outcomes from prose
+    defined_outcomes = agent_locate_defined_outcomes(full_text)
+
+    # Agent 3: Find and parse all tables
+    st.write("↳ Finding and parsing tables...")
+    table_texts = re.findall(r"(Table \d+\..*?)(?=\nTable \d+\.|\Z)", full_text, re.DOTALL)
+    all_table_outcomes = []
+    if table_texts:
+        st.success(f"✓ Found {len(table_texts)} tables to parse.")
+        for i, table_text in enumerate(table_texts):
+            st.write(f"  Parsing Table {i+1}...")
+            parsed_outcomes = agent_parse_table(table_text)
+            if parsed_outcomes:
+                all_table_outcomes.extend(parsed_outcomes)
+    else:
+        st.warning("No tables found to parse.")
+
+    # Agent 4: Synthesize everything
+    final_outcomes = agent_synthesize_and_verify(defined_outcomes, all_table_outcomes)
+
+    return study_info, final_outcomes
+
+
+# ---------- 4. STREAMLIT UI ----------
+
+st.set_page_config(layout="wide")
+st.title("Advanced Clinical Trial Outcome Extractor")
+st.markdown("This tool uses a multi-agent AI workflow with a dedicated table parser to accurately extract outcomes.")
+
+file = st.file_uploader("Upload a PDF clinical trial report", type="pdf")
+
+if file:
+    with st.status(f"Processing {file.name}...", expanded=True) as status:
+        study_info, outcomes = run_extraction_pipeline(file)
+
+        if outcomes:
+            status.update(label="Processing complete!", state="complete", expanded=False)
+            df = pd.DataFrame(outcomes)
+            
+            final_rows = []
+            if not study_info: study_info = {}
+            study_info["pdf_name"] = file.name
+
+            for outcome in outcomes:
+                row = study_info.copy()
+                row.update(outcome)
+                final_rows.append(row)
+            final_df = pd.DataFrame(final_rows)
+
+            st.success(f"Successfully extracted {len(df['outcome_domain'].unique())} domains and {len(df[df['outcome_type'] == 'specific'])} specific outcomes.")
+            st.subheader("Structured Outcome View")
+            st.dataframe(df[['outcome_type', 'outcome_domain', 'outcome_specific', 'definition', 'timepoint']], use_container_width=True, hide_index=True)
+
+            st.subheader("Export Results")
+            st.download_button(
+                "Download Extracted Data as CSV",
+                final_df.to_csv(index=False).encode('utf-8'),
+                f"extracted_outcomes_{file.name}.csv",
+                "text/csv",
+                key='download-csv'
+            )
+            
+            st.subheader("Full Data Table")
+            st.dataframe(final_df)
+            
+            st.subheader("Extracted Study Information")
+            st.json(study_info)
+
+        else:
+            status.update(label="Extraction Failed", state="error", expanded=True)
+            st.error("Could not extract any outcomes. The document may be unreadable or contain no recognized outcome patterns.")
