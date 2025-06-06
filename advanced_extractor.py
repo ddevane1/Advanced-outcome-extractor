@@ -42,14 +42,24 @@ def get_pdf_text(file_bytes: bytes):
 
 
 def ask_llm(prompt: str, *, json_mode: bool = True, max_tokens: int = DEFAULT_TOKENS):
-    response_format = {"type": "json_object"} if json_mode else {"type": "text"}
+    """Call OpenAI while satisfying the new JSON‑mode requirement.
+
+    When we request `response_format={"type": "json_object"}` the API *demands*
+    that **at least one** message contains the word “json”. We prepend a trivial
+    system message so we never hit the HTTP 400 error, while leaving every prompt
+    unchanged.
+    """
+    messages = [
+        {"role": "system", "content": "You are a json‑only assistant; always reply with valid JSON."},
+        {"role": "user", "content": prompt},
+    ]
     try:
         resp = client.chat.completions.create(
             model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             temperature=0.0,
             max_tokens=max_tokens,
-            response_format=response_format,
+            response_format={"type": "json_object"} if json_mode else {"type": "text"},
         )
         return resp.choices[0].message.content
     except Exception as e:  # noqa: BLE001
@@ -57,7 +67,7 @@ def ask_llm(prompt: str, *, json_mode: bool = True, max_tokens: int = DEFAULT_TO
         return None
 
 
-def parse_json(text: str | None, key: str | None):
+def parse_json(text: str | None, key: str | None):(text: str | None, key: str | None):
     if not text:
         return None
     try:
