@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v8.0 - final stable version) --------
+# -------- advanced_extractor.py (v8.1 - final syntax verification) --------
 
 import os
 import json
@@ -64,38 +64,41 @@ def parse_json_response(response_text: str, key: str):
 
 
 # ---------- 2. SPECIALIZED AGENT FUNCTIONS ----------
-# These functions are now called within the main cached pipeline
 
 def agent_extract_metadata(full_text: str) -> dict:
-    prompt = 'You are a metadata extraction specialist...' # Simplified for brevity
+    """Agent 1: Extracts the high-level study metadata."""
+    prompt = (
+        "You are a metadata extraction specialist. From the beginning of this document, extract study information. If absent, use null.\n"
+        'Respond in JSON: {"study_info": {"first_author_surname": "...", "publication_year": "...", "journal": "...", "study_design": "...", "study_country": "...", "patient_population": "...", "targeted_condition": "...", "diagnostic_criteria": "...", "interventions_tested": "...", "comparison_group": "..."}}\n\n'
+        f"Text to analyze:\n{full_text[:6000]}"
+    )
     return parse_json_response(ask_llm(prompt), "study_info")
 
 def agent_locate_defined_outcomes(full_text: str) -> list:
-    prompt = 'You are a clinical trial protocol analyst...'
+    """Agent 2: Finds planned outcomes from the Methods section."""
+    prompt = (
+        "You are a clinical trial protocol analyst. Extract all outcome definitions, typically found in the 'Methods' section.\n\n"
+        "**RULES:**\n"
+        "1.  **Handle Semicolon-Separated Lists:** Treat each item in a semicolon-separated list as a separate outcome domain.\n"
+        "2.  **Handle Time-Based Grouping:** Create a separate domain for each timepoint (e.g., 'before 34 weeks').\n\n"
+        "**OUTPUT FORMAT:** Return a JSON object with a list called 'defined_outcomes'.\n\n"
+        f"**Document Text to Analyze:**\n{full_text}"
+    )
     return parse_json_response(ask_llm(prompt), "defined_outcomes") or []
 
 def agent_parse_table(table_text: str) -> list:
+    """Agent 3: A specialist agent to parse a single table."""
     prompt = (
-        "You are an expert at parsing clinical trial tables...\n" # Using the same robust prompt from v5.1
-        "**STEP 1: CLASSIFY THE TABLE** (Baseline vs. Outcome)\n"
+        "You are an expert at parsing clinical trial tables. Analyze the single table text below.\n\n"
+        "**STEP 1: CLASSIFY THE TABLE**\n"
+        "First, determine if this table describes **baseline patient characteristics** (demographics, age, etc.) or **clinical trial outcomes** (results, events, complications).\n\n"
         "**STEP 2: EXTRACT BASED ON CLASSIFICATION**\n"
-        "- If BASELINE, return `{\"table_outcomes\": []}`\n"
-        "- If OUTCOME, extract clean names, domains, and specific outcomes.\n"
+        "-   **If BASELINE table**, you MUST return an empty list: `{\"table_outcomes\": []}`\n"
+        "-   **If, and ONLY IF, it is an OUTCOME table**, proceed with the extraction rules below.\n\n"
+        "**CLINICAL OUTCOME TABLE PARSING RULES:**\n"
+        "1.  **Extract Clean Names:** The outcome name is the text description ONLY. You **MUST STRIP AWAY** all trailing data, numbers, percentages, and formatting like '— no. (%)'.\n"
+        "2.  **Identify the Domain & Specific Outcomes:** The main heading is the 'outcome_domain'. Items indented under it are 'outcome_specific' measures.\n"
+        "**OUTPUT FORMAT:** Return a JSON object with a list called 'table_outcomes'.\n\n"
         f"**TABLE TEXT TO PARSE:**\n{table_text}"
     )
-    return parse_json_response(ask_llm(prompt), "table_outcomes") or []
-
-def agent_finalize_and_structure(messy_list: list) -> list:
-    prompt = (
-        "You are a data structuring expert. Clean, deduplicate, and structure this messy list of outcomes into a final hierarchical list.\n"
-        "**OUTPUT FORMAT:** Return a JSON object with key 'final_outcomes'.\n"
-        f"**MESSY LIST TO PROCESS:**\n{json.dumps(messy_list)}"
-    )
-    return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "final_outcomes") or []
-
-
-# ---------- 3. MAIN ORCHESTRATION PIPELINE (CACHED) ----------
-
-@st.cache_data(show_spinner="Running AI extraction pipeline...")
-def run_extraction_pipeline(full_text: str):
-    """Or
+    return parse_json_response(ask_llm(prompt), "
