@@ -107,7 +107,47 @@ Respond in this exact JSON format:
 
     return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "study_metadata")
 
-def agent_locate_defined_outcomes_with_details(full_text: str) -> list:
+def agent_extract_results_outcomes(full_text: str) -> list:
+    """Agent 2b: Extracts outcomes specifically mentioned in Results/Follow-up sections."""
+    prompt = f'''You are a clinical trial results analyst. Scan this document for outcomes that are REPORTED in Results, Follow-up, or Discussion sections but may not be formally defined in Methods.
+
+**CRITICAL MISSION:**
+Find outcomes that are actually measured and reported, even if not pre-specified as formal endpoints.
+
+**WHAT TO LOOK FOR:**
+- **Death/Mortality:** Any mention of deaths, mortality, fatalities
+- **Censures:** Patients lost to follow-up, withdrawn, censored
+- **Adverse Events:** Side effects, complications mentioned in results
+- **Hospital outcomes:** Length of stay, readmissions, etc.
+- **Post-hoc outcomes:** Outcomes analyzed after the fact
+
+**EXAMPLES FROM RESULTS SECTIONS:**
+- "During follow-up, there were 30 deaths none due to RSV infection"
+  → domain: "Death", definition: "mortality during follow-up", timepoint: "during follow-up"
+- "1,536 censures occurred during the study period"
+  → domain: "Censures", definition: "patients lost to follow-up", timepoint: "during study period"
+- "5 patients had severe adverse reactions requiring hospitalization"
+  → domain: "Severe adverse reactions", definition: "reactions requiring hospitalization"
+
+**SEARCH STRATEGY:**
+- Focus on Results, Follow-up, Safety, and Discussion sections
+- Look for phrases like: "there were X deaths", "Y patients died", "mortality occurred", "adverse events included"
+- Capture cause-specific outcomes if mentioned
+- Note timing/follow-up periods
+
+**OUTPUT FORMAT:** Return JSON with 'results_outcomes' list:
+{{
+  "outcome_domain": "Main outcome name",
+  "outcome_specific": "Specific measure if applicable", 
+  "definition": "HOW outcome was identified/measured",
+  "measurement_method": "How it was assessed",
+  "timepoint": "WHEN it was measured/occurred"
+}}
+
+**Document Text to Analyze:**
+{full_text}'''
+
+    return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "results_outcomes") or []
     """Agent 2: Finds planned outcomes with comprehensive definitions and timepoints."""
     prompt = f'''You are a clinical trial protocol analyst. Extract all outcome definitions from this document with COMPLETE details including definitions and timepoints.
 
@@ -116,19 +156,29 @@ def agent_locate_defined_outcomes_with_details(full_text: str) -> list:
 2. **Extract Timepoints:** Capture WHEN each outcome is measured/assessed
 3. **Extract Measurement Methods:** Capture the instruments/scales/criteria used
 4. **Handle Lists:** Treat semicolon-separated items as separate outcomes
+5. **INCLUDE FOLLOW-UP OUTCOMES:** Also capture outcomes mentioned in Results/Follow-up sections
 
 **WHAT TO LOOK FOR:**
 - Primary outcome definitions and timepoints
 - Secondary outcome definitions and timepoints  
 - Safety outcome definitions and timepoints
+- **Follow-up outcomes:** Death, mortality, censures, adverse events mentioned in Results
 - Measurement instruments (scales, questionnaires, lab tests)
-- Assessment timepoints (baseline, 30 days, discharge, etc.)
+- Assessment timepoints (baseline, 30 days, discharge, follow-up, etc.)
 
 **EXAMPLES:**
 - "Primary outcome was delivery with preeclampsia before 37 weeks of gestation" 
   → domain: "Preeclampsia", definition: "delivery with preeclampsia", timepoint: "before 37 weeks of gestation"
+- "During follow-up, there were 30 deaths none due to RSV infection"
+  → domain: "Death", definition: "mortality during follow-up", timepoint: "during follow-up"
 - "Secondary outcomes were adverse outcomes before 34 weeks, before 37 weeks, and at or after 37 weeks of gestation"
   → Extract as separate outcomes with different timepoints
+
+**SEARCH LOCATIONS:**
+- Methods/Outcome Measures sections
+- Results sections (for reported outcomes like death, censures)
+- Follow-up sections
+- Discussion of outcomes achieved
 
 **OUTPUT FORMAT:** Return JSON with 'defined_outcomes' list:
 {{
@@ -272,6 +322,9 @@ def run_comprehensive_extraction_pipeline(full_text: str):
     # Extract defined outcomes with details
     defined_outcomes = agent_locate_defined_outcomes_with_details(full_text)
     
+    # Extract outcomes from Results/Follow-up sections
+    results_outcomes = agent_extract_results_outcomes(full_text)
+    
     # Extract and parse all tables
     table_texts = re.findall(r"(Table \d+\..*?)(?=\nTable \d+\.|\Z)", full_text, re.DOTALL)
     all_table_outcomes = []
@@ -281,8 +334,8 @@ def run_comprehensive_extraction_pipeline(full_text: str):
             if parsed_outcomes:
                 all_table_outcomes.extend(parsed_outcomes)
     
-    # Combine all outcomes
-    raw_combined_list = defined_outcomes + all_table_outcomes
+    # Combine all outcomes from multiple sources
+    raw_combined_list = defined_outcomes + results_outcomes + all_table_outcomes
     if not raw_combined_list:
         return study_metadata, []
 
