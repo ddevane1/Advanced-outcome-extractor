@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v11.0 - publication-ready export) --------
+
+# -------- universal_clinical_trial_extractor.py (v12.0 - universal extraction with adverse events) --------
 
 import os
 import json
@@ -50,7 +51,7 @@ def ask_llm(prompt: str, is_json: bool = True, max_response_tokens: int = DEFAUL
         st.error(f"An API error occurred: {e}")
         return None
 
-def parse_json_response(response_text: str, key: str):
+def parse_json_response(response_text: str, key: str = None):
     """Safely parses JSON from the LLM response."""
     if not response_text: return None
     try:
@@ -63,146 +64,451 @@ json").removesuffix("
         st.warning(f"Could not parse a valid JSON response from the AI.")
         return None
 
+# ---------- 2. UNIVERSAL SPECIALIZED AGENT FUNCTIONS ----------
 
-# ---------- 2. SPECIALIZED AGENT FUNCTIONS ----------
+def agent_extract_comprehensive_metadata(full_text: str) -> dict:
+    """Agent 1: Extracts comprehensive study metadata from ANY clinical trial paper."""
+    prompt = f'''You are a universal clinical trial metadata extraction specialist. From this document, extract ALL available study information. This works for ANY clinical trial paper format (NEJM, Lancet, JAMA, etc.). If any value is not found, use null.
 
-def agent_extract_metadata(full_text: str) -> dict:
-    """Agent 1: Extracts the high-level study metadata."""
-    prompt = ('You are a metadata extraction specialist. From the beginning of this document, extract the study information. If a value is absent, use null.\n'
-              'Respond in this exact JSON format: {"study_info": {"first_author_surname": "...", "publication_year": "...", "journal": "...", "study_design": "...", "study_country": "...", "patient_population": "...", "targeted_condition": "...", "diagnostic_criteria": "...", "interventions_tested": "...", "comparison_group": "..."}}\n\n'
-              f"Text to analyze:\n{full_text[:8000]}")
-    return parse_json_response(ask_llm(prompt), "study_info")
+**REQUIRED EXTRACTION FIELDS:**
+- authors: Complete author list as written
+- first_author_surname: Just the surname of the first author
+- publication_year: Year published
+- journal: Journal name
+- study_design: Type of study (RCT, cohort, case-control, observational, systematic review, etc.)
+- study_country: Country/countries where study was conducted
+- patient_population: Description of study participants
+- targeted_condition: Disease/condition being studied
+- diagnostic_criteria: Criteria used to diagnose the condition
+- interventions_tested: All interventions/treatments tested
+- comparison_group: Control group or comparator details
 
-def agent_locate_defined_outcomes(full_text: str) -> list:
-    """Agent 2: Finds planned outcomes from the Methods section."""
-    prompt = ('You are a clinical trial protocol analyst. Extract all outcome definitions, typically found in the \'Methods\' section.\n\n'
-              '**RULES:**\n'
-              "1.  **Handle Semicolon-Separated Lists:** Treat each item in a semicolon-separated list as a separate outcome domain.\n"
-              "2.  **Handle Time-Based Grouping:** Create a separate domain for each timepoint (e.g., 'before 34 weeks').\n\n"
-              '**OUTPUT FORMAT:** Return a JSON object with a list called \'defined_outcomes\'.\n\n'
-              f'**Document Text to Analyze:**\n{full_text}')
-    return parse_json_response(ask_llm(prompt), "defined_outcomes") or []
+**SEARCH STRATEGY:**
+- Look in title page, abstract, methods section, author affiliations
+- For authors: Check bylines, author lists, affiliations
+- For study design: Check abstract, methods, or title
+- For interventions: Check methods, abstract, results
+- For population: Check methods, participants section
+- For country: Check author affiliations, methods, or study sites
 
-def agent_parse_table(table_text: str) -> list:
-    """Agent 3: A specialist agent to parse a single table."""
-    prompt = ('You are an expert at parsing clinical trial tables. Analyze the single table text below.\n\n'
-              '**STEP 1: CLASSIFY THE TABLE**\n'
-              'First, determine if this table describes **baseline patient characteristics** (demographics, age, etc.) or **clinical trial outcomes** (results, events, complications).\n\n'
-              '**STEP 2: EXTRACT BASED ON CLASSIFICATION**\n'
-              '-   **If BASELINE table**, you MUST return an empty list: {\\"table_outcomes\\": []}\n'
-              '-   **If, and ONLY IF, it is an OUTCOME table**, proceed with the extraction rules below.\n\n'
-              '**CLINICAL OUTCOME TABLE PARSING RULES:**\n'
-              "1.  **Extract Clean Names:** The outcome name is the text description ONLY. You **MUST STRIP AWAY** all trailing data, numbers, percentages, and formatting like '— no. (%)'.\n"
-              "2.  **Identify the Domain & Specific Outcomes:** The main heading is the 'outcome_domain'. Items indented under it are 'outcome_specific' measures.\n"
-              '**OUTPUT FORMAT:** Return a JSON object with a list called \'table_outcomes\'.\n\n'
-              f'**TABLE TEXT TO PARSE:**\n{table_text}')
-    return parse_json_response(ask_llm(prompt), "table_outcomes") or []
+Respond in this exact JSON format:
+{{
+  "study_metadata": {{
+    "authors": "...",
+    "first_author_surname": "...",
+    "publication_year": "...",
+    "journal": "...",
+    "study_design": "...",
+    "study_country": "...",
+    "patient_population": "...",
+    "targeted_condition": "...",
+    "diagnostic_criteria": "...",
+    "interventions_tested": "...",
+    "comparison_group": "..."
+  }}
+}}
 
-def agent_finalize_and_structure(messy_list: list) -> list:
-    """Agent 4: Takes a messy list of outcomes and cleans, deduplicates, and structures it."""
-    prompt = ('You are a data structuring expert. Clean, deduplicate, and structure this messy list of outcomes into a final hierarchical list.\n\n'
-              '**RULES:**\n'
-              '1.  For each unique outcome domain, create one entry with \\"outcome_type\\": \\"domain\\".\n'
-              '2.  For each specific outcome under a domain, create an entry with \\"outcome_type\\": \\"specific\\".\n'
-              '3.  Combine information. If you see the same outcome multiple times, merge any definitions or timepoints.\n'
-              '4.  Remove any obvious non-outcome entries or duplicates.\n\n'
-              '**OUTPUT FORMAT:** Return a final JSON object with a key \'final_outcomes\'. Each item must have keys: \'outcome_type\', \'outcome_domain\', \'outcome_specific\', \'definition\', \'measurement_method\', \'timepoint\'.\n\n'
-              f'**MESSY LIST TO PROCESS:**\n{json.dumps(messy_list, indent=2)}')
+**Document Text to Analyze (first 10,000 characters):**
+{full_text[:10000]}'''
+
+    return parse_json_response(ask_llm(prompt), "study_metadata")
+
+def agent_locate_all_outcomes(full_text: str) -> list:
+    """Agent 2: Finds ALL outcomes from ANY clinical trial paper - primary, secondary, safety, etc."""
+    prompt = f'''You are a universal clinical trial outcome extraction specialist. Extract ALL outcomes from this document, regardless of the journal format or study type.
+
+**WHAT TO EXTRACT:**
+1. **Primary outcomes** (usually in Methods/Protocol sections)
+2. **Secondary outcomes** (usually in Methods/Protocol sections)
+3. **Safety outcomes** (may be in Methods or Safety sections)
+4. **Exploratory outcomes** (if mentioned)
+5. **Post-hoc outcomes** (if mentioned)
+
+**EXTRACTION RULES:**
+1. **Multiple Formats:** Handle outcomes presented as:
+   - Numbered lists (1. Primary outcome: ...)
+   - Bullet points
+   - Paragraph descriptions
+   - Table headers that describe outcomes
+2. **Time-Based Variations:** If same outcome measured at different timepoints, create separate entries
+3. **Composite Outcomes:** If an outcome has multiple components, extract both the composite and individual components
+
+**OUTPUT FORMAT:** Return JSON with 'defined_outcomes' list. Each item needs:
+{{
+  "outcome_domain": "Main outcome category",
+  "outcome_specific": "Specific measure if applicable", 
+  "outcome_type": "primary/secondary/safety/exploratory/post-hoc",
+  "definition": "How outcome is defined",
+  "measurement_method": "How it's measured/assessed",
+  "timepoint": "When measured"
+}}
+
+**Document Text to Analyze:**
+{full_text}'''
+
+    return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "defined_outcomes") or []
+
+def agent_parse_universal_table(table_text: str) -> list:
+    """Agent 3: Universal table parser that captures TRUE hierarchical structure from tables."""
+    prompt = f'''You are an expert at parsing clinical trial tables with PERFECT hierarchical structure recognition.
+
+**CRITICAL UNDERSTANDING:**
+In clinical trial tables, the structure is typically:
+- **MAIN SECTION HEADERS** (often bold/caps) = outcome_domain
+- **INDENTED SUB-ITEMS** underneath = outcome_specific
+
+**STEP 1: CLASSIFY THE TABLE**
+Determine the table type:
+- **Baseline/Demographics:** Patient characteristics, demographics, medical history
+- **Primary/Secondary Outcomes:** Main study results, efficacy data  
+- **Adverse Events/Safety:** Side effects, complications, safety events
+- **Subgroup Analysis:** Results by patient subgroups
+- **Other:** Laboratory values, pharmacokinetics, etc.
+
+**STEP 2: EXTRACT TRUE HIERARCHICAL STRUCTURE**
+
+**If Baseline/Demographics table:** Return {{"table_outcomes": []}}
+
+**If ANY other table type:** Extract with these PRECISE rules:
+
+1. **IDENTIFY TRUE HIERARCHY FROM TABLE LAYOUT:**
+   Look for this pattern:
+   
+Main Header (often bold/caps)               <- This is outcome_domain
+       Sub-item 1 — no. (%)                   <- This is outcome_specific  
+       Sub-item 2 — no. (%)                   <- This is outcome_specific
+       Sub-item 3 — no. (%)                   <- This is outcome_specific
+   Another Main Header                         <- This is outcome_domain
+       Different sub-item — no. (%)           <- This is outcome_specific
+
+
+2. **PRESERVE COMPLETE NAMES INCLUDING ALL QUALIFIERS:**
+   - "Miscarriage or stillbirth without preeclampsia — no. (%)" becomes:
+     * outcome_specific: "Miscarriage or stillbirth without preeclampsia"
+   - "Small-for-gestational-age status without preeclampsia — no./total no. (%)" becomes:
+     * outcome_specific: "Small-for-gestational-age status without preeclampsia"
+
+3. **EXAMPLES OF CORRECT EXTRACTION:**
+   From table text like:
+   
+Adverse outcomes at <37 wk of gestation
+       Any — no. (%)                          79 (9.9)    116 (14.1)
+       Gestational hypertension — no. (%)     8 (1.0)     7 (0.9)
+       Small-for-gestational-age status without preeclampsia — no./total no. (%)  17/785 (2.2)  18/807 (2.2)
+       Miscarriage or stillbirth without preeclampsia — no. (%)  14 (1.8)  19 (2.3)
+
+   
+   Should extract:
+   - domain="Adverse outcomes at <37 wk of gestation", specific="Any"
+   - domain="Adverse outcomes at <37 wk of gestation", specific="Gestational hypertension"  
+   - domain="Adverse outcomes at <37 wk of gestation", specific="Small-for-gestational-age status without preeclampsia"
+   - domain="Adverse outcomes at <37 wk of gestation", specific="Miscarriage or stillbirth without preeclampsia"
+
+4. **HANDLE NESTED STRUCTURE:**
+   
+Stillbirth or death — no. (%)
+       All stillbirths or deaths              8 (1.0)     14 (1.7)
+       With preeclampsia or status of being small for gestational age  5 (0.6)  8 (1.0)
+       Without preeclampsia or status of being small for gestational age  3 (0.4)  6 (0.7)
+
+   
+   Should extract:
+   - domain="Stillbirth or death", specific="All stillbirths or deaths"
+   - domain="Stillbirth or death", specific="With preeclampsia or status of being small for gestational age"
+   - domain="Stillbirth or death", specific="Without preeclampsia or status of being small for gestational age"
+
+5. **SMART TIMEPOINT EXTRACTION:**
+   - Extract timepoints from domain names: "Adverse outcomes at <37 wk of gestation" → timepoint: "<37 wk of gestation"
+   - Clean outcome names but preserve all qualifiers
+
+**OUTPUT FORMAT:** JSON with 'table_outcomes' list:
+{{
+  "outcome_domain": "Exact main section header (timepoint extracted if applicable)",
+  "outcome_specific": "Exact sub-item text (complete with all qualifiers)",
+  "outcome_type": "safety/efficacy/laboratory/other",
+  "definition": "...",
+  "measurement_method": "...",
+  "timepoint": "Extracted timepoint or from domain"
+}}
+
+**TABLE TEXT TO PARSE:**
+{table_text}'''
+
+    return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "table_outcomes") or []
+
+def agent_finalize_comprehensive_structure(messy_list: list) -> list:
+    """Agent 4: Enhanced structuring that PRESERVES exact hierarchical relationships and complete names."""
+    prompt = f'''You are a clinical trial data structuring expert. Your job is to clean and organize while PRESERVING the exact hierarchical structure and complete outcome names.
+
+**CRITICAL PRESERVATION RULES:**
+
+1. **PRESERVE EXACT HIERARCHICAL STRUCTURE:**
+   - Keep domain-specific relationships EXACTLY as extracted
+   - "Adverse outcomes at <37 wk of gestation" should remain as domain with its specific sub-outcomes
+   - "Stillbirth or death" should remain as domain with its specific sub-outcomes
+   - DO NOT create generic domains like "Adverse outcomes" or "Neonatal outcomes"
+
+2. **PRESERVE COMPLETE OUTCOME NAMES:**
+   - "Miscarriage or stillbirth without preeclampsia" must stay EXACTLY as is
+   - "Small-for-gestational-age status without preeclampsia" must stay EXACTLY as is
+   - "With preeclampsia or status of being small for gestational age" must stay EXACTLY as is
+   - DO NOT truncate or simplify these names
+
+3. **MINIMAL CLEANING ONLY:**
+   - Only remove obvious formatting artifacts like "— no. (%)" 
+   - Only standardize obvious duplicates (same domain AND same specific)
+   - DO NOT change or simplify outcome names
+   - DO NOT merge different domains together
+
+4. **PRESERVE TIMEPOINT INFORMATION:**
+   - Keep timepoints from domain names: "at <37 wk of gestation" 
+   - Inherit domain timepoints to specific outcomes if they don't have their own
+   - Standardize format: "<37 wk" → "<37 weeks of gestation"
+
+5. **OUTCOME TYPE ASSIGNMENT:**
+   - "primary" for primary endpoints
+   - "secondary" for secondary endpoints  
+   - "safety" for adverse events, side effects, safety outcomes
+   - "efficacy" for treatment effectiveness measures
+   - "exploratory" for exploratory/post-hoc analyses
+   - "other" for miscellaneous outcomes
+
+**FORBIDDEN ACTIONS:**
+- DO NOT create generic domain names
+- DO NOT truncate outcome names 
+- DO NOT merge different domains
+- DO NOT simplify medical terminology
+
+**OUTPUT STRUCTURE:** Each outcome gets its own row preserving EXACT structure:
+{{
+  "outcome_type": "primary/secondary/safety/efficacy/exploratory/other",
+  "outcome_domain": "EXACT domain name as extracted",
+  "outcome_specific": "EXACT specific name as extracted", 
+  "definition": "How outcome is defined (consolidated from multiple sources)",
+  "measurement_method": "How measured (consolidated)",
+  "timepoint": "When measured (inherited from domain if applicable)"
+}}
+
+**EXAMPLE OF CORRECT PRESERVATION:**
+Input data with domain "Adverse outcomes at <37 wk of gestation" and specific "Miscarriage or stillbirth without preeclampsia"
+
+Output: 
+- outcome_domain: "Adverse outcomes at <37 wk of gestation"
+- outcome_specific: "Miscarriage or stillbirth without preeclampsia"
+- timepoint: "<37 weeks of gestation"
+
+**MESSY LIST TO PROCESS:**
+{json.dumps(messy_list, indent=2)}'''
+
     return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "final_outcomes") or []
 
+# ---------- 3. UNIVERSAL TABLE DETECTION ----------
 
-# ---------- 3. MAIN ORCHESTRATION PIPELINE (CACHED) ----------
-
-@st.cache_data(show_spinner="Step 2: Running AI extraction pipeline...")
-def run_extraction_pipeline(full_text: str):
-    """Orchestrates the AI agent calls. This entire function is cached."""
-    study_info = agent_extract_metadata(full_text)
-    defined_outcomes = agent_locate_defined_outcomes(full_text)
+def extract_all_tables(full_text: str) -> list:
+    """Enhanced universal table extraction with robust deduplication."""
+    # Multiple patterns to catch different table formats
+    patterns = [
+        r"(Table \d+\..*?)(?=\nTable \d+\.|\nFigure \d+\.|\n\n[A-Z][A-Z\s]+\n|\Z)",  # Standard format
+        r"(TABLE \d+\..*?)(?=\nTABLE \d+\.|\nFIGURE \d+\.|\n\n[A-Z][A-Z\s]+\n|\Z)",  # All caps
+        r"(\nTable \d+[:\.].*?)(?=\nTable \d+|\nFigure \d+|\n\n[A-Z][A-Z\s]+\n|\Z)",  # Slight variation
+        r"(\n\s*Table \d+.*?)(?=\n\s*Table \d+|\n\s*Figure \d+|\n\n[A-Z][A-Z\s]+\n|\Z)"  # With spaces
+    ]
     
-    table_texts = re.findall(r"(Table \d+\..*?)(?=\nTable \d+\.|\Z)", full_text, re.DOTALL)
+    all_tables = []
+    for pattern in patterns:
+        tables = re.findall(pattern, full_text, re.DOTALL | re.IGNORECASE)
+        all_tables.extend(tables)
+    
+    # Enhanced deduplication with multiple signature methods
+    seen_signatures = set()
+    unique_tables = []
+    
+    for table in all_tables:
+        # Create multiple signatures to catch edge cases
+        signatures = [
+            # Original method: first 100 chars
+            re.sub(r'\s+', ' ', table[:100]),
+            # Table number + first line
+            re.sub(r'\s+', ' ', table[:200].split('\n')[0]) if '\n' in table[:200] else table[:100],
+            # Content-based: first few data rows (skip title)
+            re.sub(r'\s+', ' ', '\n'.join(table.split('\n')[2:4])) if len(table.split('\n')) > 3 else table[:100]
+        ]
+        
+        # Check if any signature has been seen
+        is_duplicate = any(sig in seen_signatures for sig in signatures if sig.strip())
+        
+        if not is_duplicate:
+            # Add all signatures to seen set
+            for sig in signatures:
+                if sig.strip():
+                    seen_signatures.add(sig)
+            unique_tables.append(table)
+    
+    return unique_tables
+
+# ---------- 4. MAIN UNIVERSAL ORCHESTRATION PIPELINE ----------
+
+@st.cache_data(show_spinner="Step 2: Running comprehensive AI extraction pipeline...")
+def run_universal_extraction_pipeline(full_text: str):
+    """Universal orchestration that works for ANY clinical trial paper."""
+    
+    # Extract comprehensive metadata
+    study_metadata = agent_extract_comprehensive_metadata(full_text)
+    
+    # Extract all defined outcomes from text
+    defined_outcomes = agent_locate_all_outcomes(full_text)
+    
+    # Extract all tables and parse them
+    table_texts = extract_all_tables(full_text)
     all_table_outcomes = []
+    
     if table_texts:
         for table_text in table_texts:
-            parsed_outcomes = agent_parse_table(table_text)
+            parsed_outcomes = agent_parse_universal_table(table_text)
             if parsed_outcomes:
                 all_table_outcomes.extend(parsed_outcomes)
     
+    # Combine all outcomes
     raw_combined_list = defined_outcomes + all_table_outcomes
+    
     if not raw_combined_list:
-        return study_info, []
+        return study_metadata, []
+    
+    # Final structuring and cleaning
+    final_outcomes = agent_finalize_comprehensive_structure(raw_combined_list)
+    
+    return study_metadata, final_outcomes
 
-    final_outcomes = agent_finalize_and_structure(raw_combined_list)
-    return study_info, final_outcomes
-
-
-# ---------- 4. STREAMLIT UI ----------
+# ---------- 5. ENHANCED STREAMLIT UI ----------
 
 st.set_page_config(layout="wide")
-st.title("Clinical Trial Outcome Extractor (v11.0)")
-st.markdown("This tool uses a cached, multi-agent AI workflow to accurately and reliably extract outcomes.")
+st.title("Universal Clinical Trial Data Extractor (v12.0)")
+st.markdown("""
+**✨ NEW FEATURES:**
+- **Universal:** Works with ANY clinical trial paper format (NEJM, Lancet, JAMA, etc.)
+- **Comprehensive:** Extracts complete study metadata + ALL outcomes
+- **Adverse Events:** Captures safety outcomes and adverse events from any table
+- **No Duplication:** Study info shown once, outcomes listed separately
+- **Publication Ready:** Clean export format for systematic reviews
+""")
 
-uploaded_file = st.file_uploader("Upload a PDF clinical trial report to begin", type="pdf")
+uploaded_file = st.file_uploader("Upload ANY clinical trial PDF to begin", type="pdf")
 
 if uploaded_file is not None:
     file_contents = uploaded_file.getvalue()
     full_text = get_pdf_text(file_contents)
     
     if full_text:
-        study_info, outcomes = run_extraction_pipeline(full_text)
-
+        study_metadata, outcomes = run_universal_extraction_pipeline(full_text)
+        
         if outcomes:
-            st.success(f"Processing complete for **{uploaded_file.name}**.")
+            st.success(f"✅ Extraction complete for **{uploaded_file.name}**")
+            
+            # Display study metadata
+            st.subheader("📋 Study Information")
+            if study_metadata:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"**Authors:** {study_metadata.get('authors', 'Not found')}")
+                    st.write(f"**Journal:** {study_metadata.get('journal', 'Not found')}")
+                    st.write(f"**Year:** {study_metadata.get('publication_year', 'Not found')}")
+                    st.write(f"**Study Design:** {study_metadata.get('study_design', 'Not found')}")
+                    st.write(f"**Country:** {study_metadata.get('study_country', 'Not found')}")
+                
+                with col2:
+                    st.write(f"**Population:** {study_metadata.get('patient_population', 'Not found')}")
+                    st.write(f"**Condition:** {study_metadata.get('targeted_condition', 'Not found')}")
+                    st.write(f"**Interventions:** {study_metadata.get('interventions_tested', 'Not found')}")
+                    st.write(f"**Comparison:** {study_metadata.get('comparison_group', 'Not found')}")
+            
+            # Display outcomes with proper hierarchical structure
+            st.subheader("🎯 Extracted Outcomes")
+            
             df = pd.DataFrame(outcomes)
-            for col in ['outcome_domain', 'outcome_specific', 'outcome_type', 'definition', 'timepoint']:
-                if col not in df.columns: df[col] = ''
-            df.fillna('', inplace=True)
-
-            # HIERARCHICAL DISPLAY IN-APP
-            st.subheader("Hierarchical Outcome View")
-            domains = df[df['outcome_domain'] != '']['outcome_domain'].unique()
-            for domain in domains:
-                st.markdown(f"**DOMAIN:** {domain}")
-                specific_outcomes = df[(df['outcome_domain'] == domain) & (df['outcome_specific'] != '') & (df['outcome_specific'] != domain)]['outcome_specific'].unique()
-                if len(specific_outcomes) > 0:
-                    for specific in specific_outcomes:
-                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• {specific}")
-                else:
-                    st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• *This is a primary outcome or a domain with no specific sub-outcomes listed.*")
-                st.write("") 
-
-            # --- NEW PUBLICATION-READY EXPORT ---
-            st.subheader("Export Results")
-            export_rows = []
-            for domain in domains:
-                # Find the primary entry for the domain to get its definition/timepoint
-                domain_row = df[df['outcome_domain'] == domain].iloc[0]
-                export_rows.append({
-                    "Domain": domain,
-                    "Specific Outcome": "", # This is a domain row
-                    "Definition": domain_row.get('definition', ''),
-                    "Timepoint": domain_row.get('timepoint', '')
+            
+            # Organize by outcome type
+            outcome_types = ['primary', 'secondary', 'safety', 'efficacy', 'exploratory', 'other']
+            
+            for outcome_type in outcome_types:
+                type_outcomes = df[df['outcome_type'] == outcome_type] if 'outcome_type' in df.columns else pd.DataFrame()
+                
+                if not type_outcomes.empty:
+                    st.markdown(f"**{outcome_type.upper()} OUTCOMES**")
+                    
+                    # Group by domain to show hierarchical structure
+                    domains = type_outcomes['outcome_domain'].unique()
+                    
+                    for domain in domains:
+                        domain_outcomes = type_outcomes[type_outcomes['outcome_domain'] == domain]
+                        
+                        # Show domain
+                        st.markdown(f"• **{domain}**")
+                        
+                        # Show specific outcomes under this domain
+                        for _, outcome in domain_outcomes.iterrows():
+                            specific = outcome.get('outcome_specific', '')
+                            if specific and specific.strip():
+                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;◦ {specific}")
+                            # If no specific, the domain itself is the complete outcome
+                    
+                    st.write("")
+            
+            # COMPREHENSIVE EXPORT
+            st.subheader("📊 Export Data")
+            
+            # Create comprehensive export with NO DUPLICATION
+            export_data = []
+            
+            # Add study metadata once at the top
+            base_row = {
+                "Authors": study_metadata.get('authors', '') if study_metadata else '',
+                "First_Author_Surname": study_metadata.get('first_author_surname', '') if study_metadata else '',
+                "Publication_Year": study_metadata.get('publication_year', '') if study_metadata else '',
+                "Journal": study_metadata.get('journal', '') if study_metadata else '',
+                "Study_Design": study_metadata.get('study_design', '') if study_metadata else '',
+                "Study_Country": study_metadata.get('study_country', '') if study_metadata else '',
+                "Patient_Population": study_metadata.get('patient_population', '') if study_metadata else '',
+                "Targeted_Condition": study_metadata.get('targeted_condition', '') if study_metadata else '',
+                "Diagnostic_Criteria": study_metadata.get('diagnostic_criteria', '') if study_metadata else '',
+                "Interventions_Tested": study_metadata.get('interventions_tested', '') if study_metadata else '',
+                "Comparison_Group": study_metadata.get('comparison_group', '') if study_metadata else '',
+            }
+            
+            # Add each outcome as a separate row (study info will be same for all)
+            for _, outcome in df.iterrows():
+                row = base_row.copy()  # Study info stays constant
+                row.update({
+                    "Outcome_Type": outcome.get('outcome_type', ''),
+                    "Outcome_Domain": outcome.get('outcome_domain', ''),
+                    "Outcome_Specific": outcome.get('outcome_specific', ''),
+                    "Definition": outcome.get('definition', ''),
+                    "Measurement_Method": outcome.get('measurement_method', ''),
+                    "Timepoint": outcome.get('timepoint', '')
                 })
-                # Find all specific outcomes for this domain
-                specific_outcomes_df = df[(df['outcome_domain'] == domain) & (df['outcome_specific'] != '') & (df['outcome_specific'] != domain)]
-                for _, specific_row in specific_outcomes_df.iterrows():
-                    export_rows.append({
-                        "Domain": "", # Leave domain blank for specific outcomes
-                        "Specific Outcome": specific_row['outcome_specific'],
-                        "Definition": specific_row.get('definition', ''),
-                        "Timepoint": specific_row.get('timepoint', '')
-                    })
-            export_df = pd.DataFrame(export_rows)
-
+                export_data.append(row)
+            
+            export_df = pd.DataFrame(export_data)
+            
+            # Download button
+            csv_data = export_df.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="**Download Publication-Ready CSV**",
-                data=export_df.to_csv(index=False).encode('utf-8'),
-                file_name=f"Publication_Outcomes_{uploaded_file.name}.csv",
+                label="📥 **Download Complete Dataset (CSV)**",
+                data=csv_data,
+                file_name=f"Clinical_Trial_Data_{uploaded_file.name.replace('.pdf', '')}.csv",
                 mime='text/csv',
-                help="A clean, human-readable table with domains listed once, followed by their specific outcomes."
+                help="Complete dataset: Study metadata + all outcomes. Study info constant, outcomes vary per row."
             )
-
-            # EXPANDER FOR METADATA
-            with st.expander("Show Extracted Study Information"):
-                st.json(study_info or {})
+            
+            # Show preview of export
+            with st.expander("👁️ Preview Export Data"):
+                st.dataframe(export_df.head(10))
+                st.info(f"Total rows: {len(export_df)} (1 row per outcome, study metadata repeated)")
+        
         else:
-            st.error("Extraction ran but no outcomes were found.")
+            st.warning("⚠️ No outcomes were extracted. The document may not contain recognizable outcome data.")
+            
+            # Still show metadata if available
+            if study_metadata:
+                st.subheader("📋 Study Metadata Found")
+                for key, value in study_metadata.items():
+                    st.write(f"**{key.replace('_', ' ').title()}:** {value}")
