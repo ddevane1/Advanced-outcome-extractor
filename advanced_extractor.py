@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v18.0 – Final, High-Quality Prompts) --------
+# -------- advanced_extractor.py (v17.0 – Final, High-Quality) --------
 """
 Clinical-Trial Outcome Extractor
-Patch notes v18.0
-- Re-integrated the most detailed, example-driven prompts into all AI agents for maximum extraction quality.
-- This version combines the robust stability of the app with the highest-fidelity AI instructions.
-- This is the definitive, production-ready script.
+Patch notes v17.0
+- Restored detailed, example-driven prompts to all AI agents for high-quality extraction.
+- Combined the robust stability of the v16 architecture with the detailed logic of earlier versions.
+- This version is designed to be the final, production-ready script.
 """
 
 import os
@@ -66,7 +66,7 @@ def parse_json_response(response_text: str | None, key: str | None):
         st.warning("Could not parse valid JSON from AI response.")
         return None
 
-# ---------- 2. SPECIALISED AGENT FUNCTIONS ----------
+# ---------- 2. SPECIALISED AGENT FUNCTIONS (WITH ENHANCED PROMPTS) ----------
 
 def agent_extract_metadata(full_text: str) -> dict | None:
     """Agent 1 – extract high-level study metadata."""
@@ -167,8 +167,8 @@ def run_extraction_pipeline(full_text: str):
 
 # ---------- 4. STREAMLIT UI ----------
 
-st.set_page_config(layout="wide", page_title="Clinical Trial Outcome Extractor v18.0")
-st.title("Clinical-Trial Outcome Extractor (v18.0)")
+st.set_page_config(layout="wide", page_title="Clinical Trial Outcome Extractor v17.0")
+st.title("Clinical-Trial Outcome Extractor (v17.0)")
 st.markdown("This tool uses a cached, multi-agent AI workflow to accurately and reliably extract outcomes from PDF clinical-trial reports.")
 
 uploaded_file = st.file_uploader("Upload a PDF clinical-trial report to begin", type="pdf")
