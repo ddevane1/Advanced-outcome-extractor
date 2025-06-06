@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v2.2 - final UI fix) --------
+# -------- advanced_extractor.py (v2.3 - final verified) --------
 
 import os
 import json
@@ -107,3 +107,135 @@ def agent_extract_reported_results(results_text: str) -> list:
     """Agent 4: Extracts the "reported" outcomes from the Results and Tables."""
     prompt = (
         "You are a clinical trial results analyst. Extract all reported outcomes from the provided Results section and Tables. "
+        "Structure hierarchically with domain and specific measures. "
+        "Return a JSON object with a list called 'reported_results'.\n\n"
+        f"Results and Tables Text:\n{results_text}"
+    )
+    st.write("↳ Agent 4: Extracting reported results...")
+    response = ask_llm(prompt)
+    return parse_json_response(response, "reported_results") or []
+
+def agent_synthesize_and_verify(defined_outcomes: list, reported_results: list, full_text: str) -> list:
+    """Agent 5: Merges, deduplicates, and verifies the final list of outcomes."""
+    prompt = (
+        "You are a senior clinical data reviewer. Synthesize and verify outcomes from two lists: 1. `planned_outcomes` and 2. `reported_results`. "
+        "Create a single, complete, deduplicated list. For each planned outcome, find its result and merge the info. "
+        "If a planned outcome is missing, re-scan the `full_document_text` to find it. "
+        "Return a final JSON object with a key 'final_outcomes'. Each item must have keys: "
+        "'outcome_type', 'outcome_domain', 'outcome_specific', 'definition', 'measurement_method', 'timepoint'.\n\n"
+        f"planned_outcomes = {json.dumps(defined_outcomes)}\n\n"
+        f"reported_results = {json.dumps(reported_results)}\n\n"
+        f"full_document_text = {full_text}"
+    )
+    st.write("↳ Agent 5: Synthesizing and verifying final outcome list...")
+    response = ask_llm(prompt)
+    return parse_json_response(response, "final_outcomes") or []
+
+
+# ---------- 3. FALLBACK STRATEGY ----------
+
+def run_simple_extraction(full_text: str):
+    """A simpler, single-agent fallback if the advanced pipeline fails."""
+    st.warning("Switching to simple, single-pass extraction mode.")
+    prompt = (
+        "You are an expert medical reviewer. The document could not be mapped, so analyze the entire text. "
+        "Extract study metadata and all hierarchical outcomes. "
+        "Return a single JSON object with two top-level keys: 'study_info' and 'outcomes'.\n\n"
+        "'study_info' should contain: first_author_surname, publication_year, journal, etc.\n"
+        "'outcomes' should be a list where each item has keys: outcome_type, outcome_domain, outcome_specific, definition, etc.\n\n"
+        f"Full document text:\n{full_text}"
+    )
+    response = ask_llm(prompt)
+    data = parse_json_response(response, None)
+    if not data:
+        return None, None
+    return data.get("study_info"), data.get("outcomes")
+
+
+# ---------- 4. MAIN ORCHESTRATION PIPELINE ----------
+
+def run_extraction_pipeline(file):
+    """Orchestrates the entire multi-agent extraction process with a fallback."""
+    full_text = pdf_to_text(file)
+    if not full_text:
+        return None, None
+
+    section_map = agent_map_document_sections(full_text)
+
+    if not section_map:
+        return run_simple_extraction(full_text)
+
+    st.success("✓ Proceeding with advanced multi-agent extraction.")
+
+    def get_section_text(start_key, end_key=None):
+        start_marker = section_map.get(start_key)
+        if not start_marker: return ""
+        start_index = full_text.find(start_marker)
+        if start_index == -1: return ""
+        end_index = len(full_text)
+        if end_key and section_map.get(end_key):
+            next_marker = section_map.get(end_key)
+            end_index = full_text.find(next_marker, start_index)
+            if end_index == -1: end_index = len(full_text)
+        return full_text[start_index:end_index]
+
+    abstract_text = get_section_text('abstract_start', 'methods_start')
+    methods_text = get_section_text('methods_start', 'results_start')
+    results_and_tables_text = get_section_text('results_start')
+
+    study_info = agent_extract_metadata(abstract_text + "\n\n" + methods_text)
+    defined_outcomes = agent_locate_defined_outcomes(methods_text)
+    reported_results = agent_extract_reported_results(results_and_tables_text)
+    final_outcomes = agent_synthesize_and_verify(defined_outcomes, reported_results, full_text)
+
+    return study_info, final_outcomes
+
+
+# ---------- 5. STREAMLIT UI ----------
+
+st.set_page_config(layout="wide")
+st.title("Advanced Clinical Trial Outcome Extractor")
+st.markdown("This tool uses a multi-agent AI workflow to accurately extract and verify outcomes from PDF trial reports.")
+
+file = st.file_uploader("Upload a PDF clinical trial report", type="pdf")
+
+if file:
+    with st.status(f"Processing {file.name}...", expanded=True) as status:
+        study_info, outcomes = run_extraction_pipeline(file)
+
+        if outcomes:
+            status.update(label="Processing complete!", state="complete", expanded=False)
+            df = pd.DataFrame(outcomes)
+            
+            final_rows = []
+            if not study_info: study_info = {}
+            study_info["pdf_name"] = file.name
+
+            for outcome in outcomes:
+                row = study_info.copy()
+                row.update(outcome)
+                final_rows.append(row)
+            final_df = pd.DataFrame(final_rows)
+
+            st.success(f"Successfully extracted {len(df[df['outcome_type'] == 'domain'])} domains and {len(df[df['outcome_type'] == 'specific'])} specific outcomes.")
+            st.subheader("Structured Outcome View")
+            st.dataframe(df[['outcome_type', 'outcome_domain', 'outcome_specific', 'definition', 'timepoint']], use_container_width=True, hide_index=True)
+
+            st.subheader("Export Results")
+            st.download_button(
+                "Download Extracted Data as CSV",
+                final_df.to_csv(index=False).encode('utf-8'),
+                f"extracted_outcomes_{file.name}.csv",
+                "text/csv",
+                key='download-csv'
+            )
+            
+            st.subheader("Full Data Table")
+            st.dataframe(final_df)
+            
+            st.subheader("Extracted Study Information")
+            st.json(study_info)
+
+        else:
+            status.update(label="Extraction Failed", state="error", expanded=True)
+            st.error("Could not extract any outcomes even with the fallback method. The document is likely unreadable.")
