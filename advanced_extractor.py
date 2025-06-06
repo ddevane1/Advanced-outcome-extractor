@@ -107,81 +107,103 @@ Respond in this exact JSON format:
     return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "study_metadata")
 
 def agent_locate_defined_outcomes(full_text: str) -> list:
-    """Agent 2: Finds planned outcomes from the Methods section."""
-    prompt = ('You are a clinical trial protocol analyst. Extract all outcome definitions, typically found in the \'Methods\' section.\n\n'
-              '**RULES:**\n'
-              "1.  **Handle Semicolon-Separated Lists:** Treat each item in a semicolon-separated list as a separate outcome domain.\n"
-              "2.  **Handle Time-Based Grouping:** Create a separate domain for each timepoint (e.g., 'before 34 weeks').\n\n"
-              '**OUTPUT FORMAT:** Return a JSON object with a list called \'defined_outcomes\'.\n\n'
-              f'**Document Text to Analyze:**\n{full_text}')
+    """Agent 2: Finds planned outcomes from the Methods section with definitions and timepoints."""
+    prompt = f'''You are a clinical trial protocol analyst. Extract all outcome definitions from this document, typically found in the 'Methods', 'Outcome Measures', or 'Endpoints' sections.
+
+**CRITICAL EXTRACTION RULES:**
+1. **Extract Complete Definitions:** Capture HOW each outcome is defined/measured
+2. **Extract Timepoints:** Capture WHEN each outcome is measured/assessed
+3. **Extract Measurement Methods:** Capture the instruments/scales/criteria used
+4. **Handle Lists:** Treat semicolon-separated items as separate outcomes
+
+**WHAT TO LOOK FOR:**
+- Primary outcome definitions and timepoints
+- Secondary outcome definitions and timepoints  
+- Safety outcome definitions and timepoints
+- Measurement instruments (scales, questionnaires, lab tests)
+- Assessment timepoints (baseline, 30 days, discharge, etc.)
+
+**EXAMPLES:**
+- "Primary outcome was delivery with preeclampsia before 37 weeks of gestation" 
+  → domain: "Preeclampsia", definition: "delivery with preeclampsia", timepoint: "before 37 weeks of gestation"
+- "Secondary outcomes were adverse outcomes before 34 weeks, before 37 weeks, and at or after 37 weeks of gestation"
+  → Extract as separate outcomes with different timepoints
+
+**OUTPUT FORMAT:** Return JSON with 'defined_outcomes' list:
+{{
+  "outcome_domain": "Main outcome name",
+  "outcome_specific": "Specific measure if applicable",
+  "definition": "HOW the outcome is defined/measured",
+  "measurement_method": "Instrument/scale/criteria used",
+  "timepoint": "WHEN outcome is measured/assessed"
+}}
+
+**Document Text to Analyze:**
+{full_text}'''
+
     return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "defined_outcomes") or []
 
 def agent_parse_table_enhanced(table_text: str) -> list:
-    """Agent 3: Enhanced table parser that captures hierarchical structure and complete names."""
-    prompt = f'''You are an expert at parsing clinical trial tables with PERFECT hierarchical structure recognition.
+    """Agent 3: Enhanced table parser that captures hierarchical structure, complete names, and timepoints."""
+    prompt = f'''You are an expert at parsing clinical trial tables with PERFECT extraction of hierarchical structure, definitions, and timepoints.
 
 **STEP 1: CLASSIFY THE TABLE**
 First, determine if this table describes **baseline patient characteristics** (demographics, age, etc.) or **clinical trial outcomes** (results, events, complications, adverse events).
 
-**STEP 2: EXTRACT TRUE HIERARCHICAL STRUCTURE**
+**STEP 2: EXTRACT WITH COMPREHENSIVE DETAIL**
 
 **If BASELINE table:** Return `{{"table_outcomes": []}}`
 
 **If OUTCOME table:** Extract with these PRECISE rules:
 
-1. **IDENTIFY TRUE HIERARCHY FROM TABLE LAYOUT:**
-   Look for this pattern:
+1. **IDENTIFY HIERARCHICAL STRUCTURE:**
    ```
    Main Header (often bold/caps)               <- This is outcome_domain
        Sub-item 1 — no. (%)                   <- This is outcome_specific  
        Sub-item 2 — no. (%)                   <- This is outcome_specific
-       Sub-item 3 — no. (%)                   <- This is outcome_specific
-   Another Main Header                         <- This is outcome_domain
-       Different sub-item — no. (%)           <- This is outcome_specific
    ```
 
 2. **PRESERVE COMPLETE NAMES INCLUDING ALL QUALIFIERS:**
    - "Miscarriage or stillbirth without preeclampsia — no. (%)" becomes:
      * outcome_specific: "Miscarriage or stillbirth without preeclampsia"
-   - "Small-for-gestational-age status without preeclampsia — no./total no. (%)" becomes:
-     * outcome_specific: "Small-for-gestational-age status without preeclampsia"
+   - "Respiratory distress syndrome treated with surfactant and ventilation — no. (%)" becomes:
+     * outcome_specific: "Respiratory distress syndrome treated with surfactant and ventilation"
 
-3. **EXAMPLES OF CORRECT EXTRACTION:**
+3. **EXTRACT TIMEPOINTS FROM CONTEXT:**
+   - From headers like "Adverse outcomes at <37 wk of gestation" → timepoint: "<37 wk of gestation"
+   - From headers like "Secondary outcomes before 34 weeks" → timepoint: "before 34 weeks"
+   - From outcome names like "Primary endpoint at 30 days" → timepoint: "30 days"
+
+4. **EXTRACT DEFINITIONS WHERE AVAILABLE:**
+   - Look for explanatory text about how outcomes are defined
+   - Capture measurement criteria mentioned in table footnotes or headers
+   - Note any diagnostic criteria referenced
+
+5. **EXAMPLES OF CORRECT EXTRACTION:**
    From table text like:
    ```
    Adverse outcomes at <37 wk of gestation
-       Any — no. (%)                          79 (9.9)    116 (14.1)
+       Preeclampsia — no. (%)                 13 (1.6)    35 (4.3)
        Gestational hypertension — no. (%)     8 (1.0)     7 (0.9)
        Small-for-gestational-age status without preeclampsia — no./total no. (%)  17/785 (2.2)  18/807 (2.2)
-       Miscarriage or stillbirth without preeclampsia — no. (%)  14 (1.8)  19 (2.3)
    ```
    
    Should extract:
-   - domain="Adverse outcomes at <37 wk of gestation", specific="Any"
-   - domain="Adverse outcomes at <37 wk of gestation", specific="Gestational hypertension"  
-   - domain="Adverse outcomes at <37 wk of gestation", specific="Small-for-gestational-age status without preeclampsia"
-   - domain="Adverse outcomes at <37 wk of gestation", specific="Miscarriage or stillbirth without preeclampsia"
+   - domain="Adverse outcomes", specific="Preeclampsia", timepoint="<37 wk of gestation"
+   - domain="Adverse outcomes", specific="Gestational hypertension", timepoint="<37 wk of gestation"  
+   - domain="Adverse outcomes", specific="Small-for-gestational-age status without preeclampsia", timepoint="<37 wk of gestation"
 
-4. **HANDLE NESTED STRUCTURE:**
-   ```
-   Stillbirth or death — no. (%)
-       All stillbirths or deaths              8 (1.0)     14 (1.7)
-       With preeclampsia or status of being small for gestational age  5 (0.6)  8 (1.0)
-       Without preeclampsia or status of being small for gestational age  3 (0.4)  6 (0.7)
-   ```
-   
-   Should extract:
-   - domain="Stillbirth or death", specific="All stillbirths or deaths"
-   - domain="Stillbirth or death", specific="With preeclampsia or status of being small for gestational age"
-   - domain="Stillbirth or death", specific="Without preeclampsia or status of being small for gestational age"
+6. **CAPTURE MEASUREMENT METHODS:**
+   - Look for references to scales, questionnaires, lab tests
+   - Note any footnotes explaining measurement criteria
 
-**OUTPUT FORMAT:** Return a JSON object with a list called 'table_outcomes':
+**OUTPUT FORMAT:** Return JSON with 'table_outcomes' list:
 {{
-  "outcome_domain": "Exact main section header",
+  "outcome_domain": "Exact main section header (timepoint extracted if applicable)",
   "outcome_specific": "Exact sub-item text (complete with all qualifiers)",
-  "definition": "...",
-  "measurement_method": "...",
-  "timepoint": "..."
+  "definition": "How outcome is defined/measured (from context)",
+  "measurement_method": "Instrument/scale/criteria used (if mentioned)",
+  "timepoint": "When outcome is measured/assessed"
 }}
 
 **TABLE TEXT TO PARSE:**
@@ -190,27 +212,51 @@ First, determine if this table describes **baseline patient characteristics** (d
     return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "table_outcomes") or []
 
 def agent_finalize_and_structure_enhanced(messy_list: list) -> list:
-    """Agent 4: Enhanced structuring that preserves hierarchical structure and complete names."""
-    prompt = f'''You are a data structuring expert. Clean, deduplicate, and structure this messy list of outcomes while PRESERVING hierarchical structure and complete outcome names.
+    """Agent 4: Enhanced structuring that preserves hierarchical structure, complete names, definitions and timepoints."""
+    prompt = f'''You are a data structuring expert. Clean, deduplicate, and structure this messy list of outcomes while PRESERVING hierarchical structure, complete outcome names, definitions, and timepoints.
 
 **CRITICAL PRESERVATION RULES:**
+
 1. **PRESERVE EXACT HIERARCHICAL STRUCTURE:**
    - Keep domain-specific relationships EXACTLY as extracted
    - "Adverse outcomes at <37 wk of gestation" should remain as domain with its specific sub-outcomes
-   - "Stillbirth or death" should remain as domain with its specific sub-outcomes
    - DO NOT create generic domains
 
 2. **PRESERVE COMPLETE OUTCOME NAMES:**
    - "Miscarriage or stillbirth without preeclampsia" must stay EXACTLY as is
-   - "Small-for-gestational-age status without preeclampsia" must stay EXACTLY as is
+   - "Respiratory distress syndrome treated with surfactant and ventilation" must stay EXACTLY as is
    - DO NOT truncate or simplify these names
 
-3. **OUTCOME STRUCTURE:**
+3. **CONSOLIDATE DEFINITIONS AND TIMEPOINTS:**
+   - Combine definition information from multiple sources for the same outcome
+   - Merge timepoint information intelligently
+   - If same outcome appears with different definitions, combine them
+   - Standardize similar timepoints: "before 37 weeks", "<37 wk", "prior to 37 weeks" → "before 37 weeks"
+
+4. **OUTCOME STRUCTURE:**
    - For each unique outcome domain, create one entry with `"outcome_type": "domain"`
    - For each specific outcome under a domain, create an entry with `"outcome_type": "specific"`
-   - Combine information if you see the same outcome multiple times
+   - Inherit domain timepoints to specific outcomes if they don't have their own
 
-**OUTPUT FORMAT:** Return a final JSON object with a key 'final_outcomes'. Each item must have keys: 'outcome_type', 'outcome_domain', 'outcome_specific', 'definition', 'measurement_method', 'timepoint'.
+5. **DEFINITION ENHANCEMENT:**
+   - Look for outcome definitions from Methods sections
+   - Combine table-based information with protocol definitions
+   - Preserve diagnostic criteria and measurement details
+
+6. **TIMEPOINT STANDARDIZATION:**
+   - "at 30 days", "day 30", "30-day" → "30 days"
+   - "before 37 weeks", "<37 wk of gestation", "prior to 37 weeks" → "before 37 weeks of gestation"
+   - "at hospital discharge", "discharge", "upon discharge" → "hospital discharge"
+
+**OUTPUT FORMAT:** Return a final JSON object with a key 'final_outcomes'. Each item must have:
+{{
+  "outcome_type": "domain/specific",
+  "outcome_domain": "Exact domain name",
+  "outcome_specific": "Exact specific name (or blank for domain-only)",
+  "definition": "Complete definition of how outcome is measured/defined",
+  "measurement_method": "Instrument/scale/criteria used",
+  "timepoint": "When outcome is measured/assessed (standardized)"
+}}
 
 **MESSY LIST TO PROCESS:**
 {json.dumps(messy_list, indent=2)}'''
@@ -330,6 +376,7 @@ if uploaded_file is not None:
                     "Outcome_Domain": "",
                     "Outcome_Specific": "",
                     "Definition": "",
+                    "Measurement_Method": "",
                     "Timepoint": ""
                 }
                 export_rows.append(study_row)
@@ -352,6 +399,7 @@ if uploaded_file is not None:
                     "Outcome_Domain": domain,
                     "Outcome_Specific": "",
                     "Definition": domain_row.get('definition', ''),
+                    "Measurement_Method": domain_row.get('measurement_method', ''),
                     "Timepoint": domain_row.get('timepoint', '')
                 }
                 export_rows.append(outcome_row)
@@ -373,6 +421,7 @@ if uploaded_file is not None:
                         "Outcome_Domain": "",
                         "Outcome_Specific": specific_row['outcome_specific'],
                         "Definition": specific_row.get('definition', ''),
+                        "Measurement_Method": specific_row.get('measurement_method', ''),
                         "Timepoint": specific_row.get('timepoint', '')
                     }
                     export_rows.append(specific_outcome_row)
