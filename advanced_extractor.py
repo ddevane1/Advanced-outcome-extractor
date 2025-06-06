@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v12.1 - explicit JSON prompts) --------
+# -------- advanced_extractor.py (v13.0 - final API fix) --------
 
 import os
 import json
@@ -35,12 +35,15 @@ def get_pdf_text(file_contents):
         return None
 
 def ask_llm(prompt: str, is_json: bool = True, max_response_tokens: int = DEFAULT_TOKENS_FOR_RESPONSE) -> str:
-    """Generic function to call the OpenAI API."""
+    """Generic function to call the OpenAI API. Now with a forced JSON instruction."""
     try:
+        # **THE FIX IS HERE**: Forcing the JSON instruction into every prompt.
+        final_prompt = "You must provide a response in JSON format. " + prompt
+        
         response_format = {"type": "json_object"} if is_json else {"type": "text"}
         response = client.chat.completions.create(
             model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": final_prompt}],
             temperature=0.0,
             max_tokens=max_response_tokens,
             response_format=response_format
@@ -66,8 +69,8 @@ def parse_json_response(response_text: str, key: str):
 
 def agent_extract_metadata(full_text: str) -> dict:
     """Agent 1: Extracts the high-level study metadata."""
-    prompt = f"""You are a metadata extraction specialist. From the beginning of this document, extract the study information. If a value is absent, use null.
-You must respond in JSON format, like this: {{"study_info": {{"first_author_surname": "...", "publication_year": "..."}}}}
+    prompt = f"""From the beginning of this document, extract the study information. If a value is absent, use null.
+Respond with a key "study_info".
 
 Text to analyze:
 {full_text[:8000]}
@@ -76,9 +79,9 @@ Text to analyze:
 
 def agent_locate_defined_outcomes(full_text: str) -> list:
     """Agent 2: Finds planned outcomes from the Methods section."""
-    prompt = f"""You are a clinical trial protocol analyst. Extract all outcome definitions, typically found in the 'Methods' section.
+    prompt = f"""Extract all outcome definitions, typically found in the 'Methods' section.
 Handle Semicolon-Separated Lists and Time-Based Grouping as separate domains.
-You must respond in a JSON object with a list called 'defined_outcomes'.
+Respond with a list called 'defined_outcomes'.
 
 Document Text to Analyze:
 {full_text}
@@ -87,11 +90,11 @@ Document Text to Analyze:
 
 def agent_parse_table(table_text: str) -> list:
     """Agent 3: A specialist agent to parse a single table."""
-    prompt = f"""You are an expert at parsing clinical trial tables. Analyze the single table text below.
+    prompt = f"""Analyze the single table text below.
 First, determine if this table describes baseline characteristics or clinical trial outcomes.
-If it is a BASELINE table, you MUST return an empty list in your JSON response.
+If it is a BASELINE table, return an empty list.
 If it is an OUTCOME table, extract the clean outcome names, distinguishing between domains and specific outcomes. Strip away all data columns.
-You must respond in a JSON object with a list called 'table_outcomes'.
+Respond with a list called 'table_outcomes'.
 
 TABLE TEXT TO PARSE:
 {table_text}
@@ -100,10 +103,10 @@ TABLE TEXT TO PARSE:
 
 def agent_finalize_and_structure(messy_list: list) -> list:
     """Agent 4: Takes a messy list of outcomes and cleans, deduplicates, and structures it."""
-    prompt = f"""You are a data structuring expert. Clean, deduplicate, and structure this messy list of outcomes into a final hierarchical list.
+    prompt = f"""Clean, deduplicate, and structure this messy list of outcomes into a final hierarchical list.
 For each unique outcome domain, create one entry with `"outcome_type": "domain"`.
 For each specific outcome under a domain, create an entry with `"outcome_type": "specific"`.
-You must respond in a final JSON object with a key 'final_outcomes'.
+Respond with a key 'final_outcomes'.
 
 MESSY LIST TO PROCESS:
 {json.dumps(messy_list, indent=2)}
@@ -139,7 +142,7 @@ def run_extraction_pipeline(full_text: str):
 # ---------- 4. STREAMLIT UI ----------
 
 st.set_page_config(layout="wide")
-st.title("Clinical Trial Outcome Extractor (v12.1)")
+st.title("Clinical Trial Outcome Extractor (v13.0)")
 st.markdown("This tool uses a cached, multi-agent AI workflow to accurately and reliably extract outcomes.")
 
 uploaded_file = st.file_uploader("Upload a PDF clinical trial report to begin", type="pdf")
@@ -159,7 +162,7 @@ if uploaded_file is not None:
                 if col not in df.columns: df[col] = ''
             df.fillna('', inplace=True)
 
-            # HIERARCHICAL DISPLAY
+            # Display and export logic remains the same...
             st.subheader("Hierarchical Outcome View")
             domains = df[df['outcome_domain'] != '']['outcome_domain'].unique()
             for domain in domains:
@@ -172,7 +175,6 @@ if uploaded_file is not None:
                     st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• *This is a primary outcome or a domain with no specific sub-outcomes listed.*")
                 st.write("") 
 
-            # DATA EXPORT
             st.subheader("Export Results")
             export_rows = []
             for domain in domains:
@@ -187,11 +189,9 @@ if uploaded_file is not None:
                 label="**Download Publication-Ready CSV**",
                 data=export_df.to_csv(index=False).encode('utf-8'),
                 file_name=f"Publication_Outcomes_{uploaded_file.name}.csv",
-                mime='text/csv',
-                help="A clean, human-readable table with domains listed once, followed by their specific outcomes."
+                mime='text/csv'
             )
 
-            # EXPANDER FOR METADATA AND RAW DATA
             with st.expander("Show Extracted Study Information"):
                 st.json(study_info or {})
             with st.expander("Show Full Raw Data Table (for analysis)"):
