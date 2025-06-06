@@ -114,9 +114,9 @@ Return JSON {{'final_outcomes': […]}}.
 # ---------- 3. TABLE DETECTION (unchanged) ----------
 
 table_patterns = [
-    r"(Table \d+\..*?)(?=\nTable \d+\.|
-                       \nFigure \d+\.|
-                       \n\n[A-Z][A-Z\s]+\n|
+    # Single‑line raw string avoids unterminated‑literal syntax errors
+    r"(Table\s+\d+\..*?)(?=\n(?:Table\s+\d+\.|Figure\s+\d+\.|\n[A-Z][A-Z\s]+\n|$))"
+][A-Z\s]+\n|
                        \Z)"  # standard / figure / section / EOF
 ]
 
