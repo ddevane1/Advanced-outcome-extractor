@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v11.1 - final table parsing fix) --------
+# -------- advanced_extractor.py (v12.0 - restored full prompts) --------
 
 import os
 import json
@@ -66,51 +66,54 @@ def parse_json_response(response_text: str, key: str):
 
 def agent_extract_metadata(full_text: str) -> dict:
     """Agent 1: Extracts the high-level study metadata."""
-    prompt = ('You are a metadata extraction specialist...')
+    prompt = (
+        "You are a metadata extraction specialist. From the beginning of this document, extract the study information. If a value is absent, use null.\n"
+        'Respond in this exact JSON format: {"study_info": {"first_author_surname": "...", "publication_year": "...", "journal": "...", "study_design": "...", "study_country": "...", "patient_population": "...", "targeted_condition": "...", "diagnostic_criteria": "...", "interventions_tested": "...", "comparison_group": "..."}}\n\n'
+        f"Text to analyze:\n{full_text[:8000]}"
+    )
     return parse_json_response(ask_llm(prompt), "study_info")
 
 def agent_locate_defined_outcomes(full_text: str) -> list:
     """Agent 2: Finds planned outcomes from the Methods section."""
-    prompt = ('You are a clinical trial protocol analyst...')
+    prompt = (
+        "You are a clinical trial protocol analyst. Extract all outcome definitions, typically found in the 'Methods' section.\n\n"
+        "**RULES:**\n"
+        "1.  **Handle Semicolon-Separated Lists:** Treat each item in a semicolon-separated list as a separate outcome domain.\n"
+        "2.  **Handle Time-Based Grouping:** Create a separate domain for each timepoint (e.g., 'before 34 weeks').\n\n"
+        "**OUTPUT FORMAT:** Return a JSON object with a list called 'defined_outcomes'.\n\n"
+        f"**Document Text to Analyze:**\n{full_text}"
+    )
     return parse_json_response(ask_llm(prompt), "defined_outcomes") or []
 
 def agent_parse_table(table_text: str) -> list:
-    """Agent 3: A specialist agent to parse a single table, with enhanced hierarchy detection."""
+    """Agent 3: A specialist agent to parse a single table."""
     prompt = (
         "You are an expert at parsing clinical trial tables. Analyze the single table text below.\n\n"
         "**STEP 1: CLASSIFY THE TABLE**\n"
-        "First, determine if this table describes **baseline patient characteristics** or **clinical trial outcomes**.\n"
-        "If it is a BASELINE table, you MUST return an empty list: `{\"table_outcomes\": []}`\n\n"
-        "**STEP 2: EXTRACT OUTCOMES (ONLY if it is an outcome table)**\n"
-        "**CRITICAL RULES:**\n"
-        "1.  **Extract Clean Names:** The outcome name is the text description ONLY. You **MUST STRIP AWAY** all trailing data like '— no. (%)'.\n"
-        "2.  **Understand Hierarchy:** A bolded heading is a 'domain'. Items listed under that heading are its 'specific outcomes'. An item can be both a domain and a specific outcome if it has further sub-points.\n\n"
-        "--- **DETAILED EXAMPLE OF HIERARCHY** ---\n"
-        "**IF THE INPUT TABLE TEXT IS:**\n"
-        "'''\nAdverse outcomes at <34 wk of gestation\n"
-        "Any — no. (%) 32 (4.0) 53 (6.4)\n"
-        "Preeclampsia — no. (%) 3 (0.4) 15 (1.8)\n"
-        "Gestational hypertension — no. (%) 2 (0.3) 2 (0.2)\n'''\n\n"
-        "**YOUR JSON OUTPUT MUST BE:**\n"
-        "```json\n"
-        "{\n"
-        '  "table_outcomes": [\n'
-        '    {"outcome_domain": "Adverse outcomes at <34 wk of gestation", "outcome_specific": "Any"},\n'
-        '    {"outcome_domain": "Adverse outcomes at <34 wk of gestation", "outcome_specific": "Preeclampsia"},\n'
-        '    {"outcome_domain": "Adverse outcomes at <34 wk of gestation", "outcome_specific": "Gestational hypertension"}\n'
-        "  ]\n"
-        "}\n"
-        "```\n"
-        "--- END OF EXAMPLE ---\n\n"
-        "**OUTPUT FORMAT:** Return a JSON object with a list called 'table_outcomes'. This list will be empty for baseline tables.\n\n"
+        "First, determine if this table describes **baseline patient characteristics** (demographics, age, etc.) or **clinical trial outcomes** (results, events, complications).\n\n"
+        "**STEP 2: EXTRACT BASED ON CLASSIFICATION**\n"
+        "-   **If BASELINE table**, you MUST return an empty list: `{\"table_outcomes\": []}`\n"
+        "-   **If, and ONLY IF, it is an OUTCOME table**, proceed with the extraction rules below.\n\n"
+        "**CLINICAL OUTCOME TABLE PARSING RULES:**\n"
+        "1.  **Extract Clean Names:** The outcome name is the text description ONLY. You **MUST STRIP AWAY** all trailing data, numbers, percentages, and formatting like '— no. (%)'.\n"
+        "2.  **Identify the Domain & Specific Outcomes:** The main heading is the 'outcome_domain'. Items indented under it are 'outcome_specific' measures.\n"
+        "**OUTPUT FORMAT:** Return a JSON object with a list called 'table_outcomes'.\n\n"
         f"**TABLE TEXT TO PARSE:**\n{table_text}"
     )
     return parse_json_response(ask_llm(prompt), "table_outcomes") or []
 
 def agent_finalize_and_structure(messy_list: list) -> list:
     """Agent 4: Takes a messy list of outcomes and cleans, deduplicates, and structures it."""
-    prompt = ('You are a data structuring expert. Clean, deduplicate, and structure this messy list of outcomes into a final hierarchical list...\n'
-              f'**MESSY LIST TO PROCESS:**\n{json.dumps(messy_list, indent=2)}')
+    prompt = (
+        "You are a data structuring expert. Clean, deduplicate, and structure this messy list of outcomes into a final hierarchical list.\n\n"
+        "**RULES:**\n"
+        "1.  For each unique outcome domain, create one entry with `\"outcome_type\": \"domain\"`.\n"
+        "2.  For each specific outcome under a domain, create an entry with `\"outcome_type\": \"specific\"`.\n"
+        "3.  Combine information. If you see the same outcome multiple times, merge any definitions or timepoints.\n"
+        "4.  Remove any obvious non-outcome entries or duplicates.\n\n"
+        "**OUTPUT FORMAT:** Return a final JSON object with a key 'final_outcomes'. Each item must have keys: 'outcome_type', 'outcome_domain', 'outcome_specific', 'definition', 'measurement_method', 'timepoint'.\n\n"
+        f"**MESSY LIST TO PROCESS:**\n{json.dumps(messy_list, indent=2)}"
+    )
     return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "final_outcomes") or []
 
 
@@ -142,7 +145,7 @@ def run_extraction_pipeline(full_text: str):
 # ---------- 4. STREAMLIT UI ----------
 
 st.set_page_config(layout="wide")
-st.title("Clinical Trial Outcome Extractor (v11.1)")
+st.title("Clinical Trial Outcome Extractor (v12.0)")
 st.markdown("This tool uses a cached, multi-agent AI workflow to accurately and reliably extract outcomes.")
 
 uploaded_file = st.file_uploader("Upload a PDF clinical trial report to begin", type="pdf")
@@ -161,7 +164,6 @@ if uploaded_file is not None:
                 if col not in df.columns: df[col] = ''
             df.fillna('', inplace=True)
 
-            # HIERARCHICAL DISPLAY IN-APP
             st.subheader("Hierarchical Outcome View")
             domains = df[df['outcome_domain'] != '']['outcome_domain'].unique()
             for domain in domains:
@@ -174,7 +176,6 @@ if uploaded_file is not None:
                     st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• *This is a primary outcome or a domain with no specific sub-outcomes listed.*")
                 st.write("") 
 
-            # PUBLICATION-READY EXPORT
             st.subheader("Export Results")
             export_rows = []
             for domain in domains:
@@ -193,7 +194,6 @@ if uploaded_file is not None:
                 help="A clean, human-readable table with domains listed once, followed by their specific outcomes."
             )
 
-            # EXPANDER FOR METADATA AND RAW DATA
             with st.expander("Show Extracted Study Information"):
                 st.json(study_info or {})
             with st.expander("Show Full Raw Data Table (for analysis)"):
