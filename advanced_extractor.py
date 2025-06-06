@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -------- advanced_extractor.py (v4.1 - final syntax verified) --------
+# -------- advanced_extractor.py (v4.3 - ignores baseline tables) --------
 
 import os
 import json
@@ -12,7 +12,8 @@ from openai import OpenAI
 
 # ----- CONFIG -----
 MODEL = "gpt-4o"
-TOKENS_FOR_RESPONSE = 4000
+DEFAULT_TOKENS_FOR_RESPONSE = 4096
+LARGE_TOKENS_FOR_RESPONSE = 8192 # Increased limit for the large final synthesis
 client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY")))
 enc = tiktoken.encoding_for_model(MODEL)
 
@@ -31,15 +32,15 @@ def pdf_to_text(file):
         st.error(f"Error reading PDF: {e}")
         return None
 
-def ask_llm(prompt: str, is_json: bool = True) -> str:
-    """Generic function to call the OpenAI API."""
+def ask_llm(prompt: str, is_json: bool = True, max_response_tokens: int = DEFAULT_TOKENS_FOR_RESPONSE) -> str:
+    """Generic function to call the OpenAI API, with adjustable token limit."""
     try:
         response_format = {"type": "json_object"} if is_json else {"type": "text"}
         response = client.chat.completions.create(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=TOKENS_FOR_RESPONSE,
+            max_tokens=max_response_tokens,
             response_format=response_format
         )
         return response.choices[0].message.content
@@ -56,7 +57,7 @@ def parse_json_response(response_text: str, key: str):
         data = json.loads(json_str)
         return data if key is None else data.get(key)
     except (json.JSONDecodeError, AttributeError) as e:
-        st.warning(f"Could not parse JSON for key '{key}'. Raw response: {response_text[:500]}")
+        st.warning(f"Could not parse JSON for key '{key}'. The response may have been cut off. Raw response: {response_text[:500]}")
         return None
 
 
@@ -80,9 +81,6 @@ def agent_locate_defined_outcomes(full_text: str) -> list:
         "**CRITICAL EXTRACTION RULES:**\n"
         "1.  **Handle Semicolon-Separated Lists:** When a sentence lists outcomes separated by semicolons (e.g., 'Secondary outcomes were A; B; and C'), treat each item (A, B, C) as a separate outcome domain.\n"
         "2.  **Handle Time-Based Grouping:** When outcomes are grouped by time (e.g., 'before 34 weeks'), create a separate domain for each timepoint.\n\n"
-        "**EXAMPLE:**\n"
-        "If you see: 'Secondary outcomes were adverse outcomes of pregnancy before 34 weeks of gestation; and poor fetal growth...'\n"
-        "You MUST extract these as separate domains: 'Adverse outcomes of pregnancy before 34 weeks of gestation' and 'Poor fetal growth'.\n\n"
         "**OUTPUT FORMAT:** Return a JSON object with a list called 'defined_outcomes'.\n\n"
         f"**Document Text to Analyze:**\n{full_text}"
     )
@@ -92,35 +90,29 @@ def agent_locate_defined_outcomes(full_text: str) -> list:
 
 
 def agent_parse_table(table_text: str) -> list:
-    """Agent 3: A specialist agent to parse the text of a single table."""
+    """Agent 3: A specialist agent to parse the text of a single table, now with intelligence to skip baseline tables."""
     prompt = (
-        "You are an expert at parsing clinical trial tables. Your only job is to analyze the text of the single table provided below and extract its hierarchical outcomes. DO NOT HALLUCINATE.\n\n"
-        "**CRITICAL TABLE PARSING RULES:**\n"
-        "1.  **Identify the Domain:** The main heading of a group of outcomes is the 'outcome_domain'. It often ends with '— no. (%)' or is a bolded header for a section.\n"
+        "You are an expert at parsing clinical trial tables. Your job is to analyze the text of the single table provided below.\n\n"
+        "**STEP 1: CLASSIFY THE TABLE**\n"
+        "First, determine if this table describes **baseline patient characteristics** (demographics, age, risk factors, etc.) or if it describes **clinical trial outcomes** (results, events, complications, efficacy, safety).\n\n"
+        "**STEP 2: EXTRACT BASED ON CLASSIFICATION**\n"
+        "-   **If the table is for BASELINE CHARACTERISTICS**, you MUST return an empty list. Your response must be exactly: `{\"table_outcomes\": []}`\n"
+        "-   **If, and ONLY IF, the table describes CLINICAL OUTCOMES**, proceed with the extraction rules below.\n\n"
+        "**CLINICAL OUTCOME TABLE PARSING RULES:**\n"
+        "1.  **Identify the Domain:** The main heading of a group of outcomes is the 'outcome_domain'.\n"
         "2.  **Identify Specific Outcomes:** Items listed or indented under a domain heading are the 'outcome_specific' measures.\n"
         "3.  **Verbatim Extraction:** Use the EXACT wording from the table.\n\n"
-        "--- TABLE PARSING EXAMPLES ---\n"
-        "**EXAMPLE 1:**\n"
-        "If the table text is:\n"
-        "'''\nDeath or complications — no. (%)\n"
-        "  Any                                32 (4.0)\n"
-        "  Miscarriage, stillbirth, or death  19 (2.4)\n'''\n"
-        "Extract as:\n"
-        "- Domain: 'Death or complications', Specific: 'Any'\n"
-        "- Domain: 'Death or complications', Specific: 'Miscarriage, stillbirth, or death'\n\n"
-        "**EXAMPLE 2:**\n"
-        "If the table text is:\n"
-        "'''\nAdverse outcomes at <34 wk of gestation\n"
-        "  Any — no. (%)                            32 (4.0)\n"
-        "  Preeclampsia — no. (%)                   3 (0.4)\n'''\n"
-        "Extract as:\n"
-        "- Domain: 'Adverse outcomes at <34 wk of gestation', Specific: 'Any'\n"
-        "- Domain: 'Adverse outcomes at <34 wk of gestation', Specific: 'Preeclampsia'\n\n"
+        "--- EXAMPLES ---\n"
+        "**Example of a BASELINE Table to IGNORE:**\n"
+        "If table text is: 'Table 1. Characteristics of the Participants. Age (years) 55; White - no. (%) 100 (50%)'\n"
+        "Your output MUST be: `{\"table_outcomes\": []}`\n\n"
+        "**Example of an OUTCOME Table to PARSE:**\n"
+        "If table text is: 'Death or complications — no. (%) Any 32 (4.0); Miscarriage, stillbirth, or death 19 (2.4)'\n"
+        "Your output should be a list of two outcomes under the 'Death or complications' domain.\n"
         "--- END OF EXAMPLES ---\n\n"
-        "**OUTPUT FORMAT:** Return a JSON object with a list called 'table_outcomes'. Each item must have 'outcome_domain' and 'outcome_specific'.\n\n"
+        "**OUTPUT FORMAT:** Return a JSON object with a list called 'table_outcomes'. This list will be empty for baseline tables.\n\n"
         f"**TABLE TEXT TO PARSE:**\n{table_text}"
     )
-    # This agent does not need a spinner, it's part of a larger process
     response = ask_llm(prompt)
     return parse_json_response(response, "table_outcomes") or []
 
@@ -140,7 +132,7 @@ def agent_synthesize_and_verify(defined_outcomes: list, table_outcomes: list) ->
         f"table_outcomes = {json.dumps(table_outcomes)}"
     )
     st.write("↳ Final Agent: Synthesizing all outcomes...")
-    response = ask_llm(prompt)
+    response = ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE)
     return parse_json_response(response, "final_outcomes") or []
 
 
@@ -165,10 +157,14 @@ def run_extraction_pipeline(file):
     if table_texts:
         st.success(f"✓ Found {len(table_texts)} tables to parse.")
         for i, table_text in enumerate(table_texts):
-            st.write(f"  Parsing Table {i+1}...")
+            # The agent will now internally decide if the table is worth parsing
+            st.write(f"  Analyzing Table {i+1}...")
             parsed_outcomes = agent_parse_table(table_text)
             if parsed_outcomes:
+                st.write(f"    -> Table {i+1} is an OUTCOME table. Extracted {len(parsed_outcomes)} items.")
                 all_table_outcomes.extend(parsed_outcomes)
+            else:
+                st.write(f"    -> Table {i+1} is a BASELINE table. Skipping.")
     else:
         st.warning("No tables found to parse.")
 
