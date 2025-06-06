@@ -148,6 +148,8 @@ Find outcomes that are actually measured and reported, even if not pre-specified
 {full_text}'''
 
     return parse_json_response(ask_llm(prompt, max_response_tokens=LARGE_TOKENS_FOR_RESPONSE), "results_outcomes") or []
+
+def agent_locate_defined_outcomes_with_details(full_text: str) -> list:
     """Agent 2: Finds planned outcomes with comprehensive definitions and timepoints."""
     prompt = f'''You are a clinical trial protocol analyst. Extract all outcome definitions from this document with COMPLETE details including definitions and timepoints.
 
