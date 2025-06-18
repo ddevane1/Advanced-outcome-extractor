@@ -15,7 +15,7 @@ from pathlib import Path
 from openai import OpenAI
 
 # ----- CONFIG -----
-MODEL = "o"
+MODEL = "o3"
 DEFAULT_TOKENS_FOR_RESPONSE = 4096
 LARGE_TOKENS_FOR_RESPONSE = 8192
 client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY")))
